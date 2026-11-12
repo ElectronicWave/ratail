@@ -1,0 +1,3 @@
+interface:
+  display_name: "Use Ratail"
+  short_description: "Build ratatui terminal apps with ratail"

@@ -1,0 +1,23 @@
+{
+  "skill_name": "use-ratail",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我们项目已经在用 ratail。给 Dashboard 加一个 Settings 页面，从 Dashboard 按 s 进去，Settings 里按 Esc 返回，再在 Settings 里按 r 重新加载共享的 config。",
+      "expected_output": "新增 Route::Settings、SettingsPage 和对应 KeyMap；从 Dashboard 返回 PageEvent::Navigate(NavAction::Push(Route::Settings))；Settings 返回 NavAction::Pop；重新加载通过 Context 中的共享 Task 完成；全局按键处理顺序正确。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "这个 ratatui app 现在所有输入和后台结果都走 mpsc Action 总线，想改成 ratail。我们有 Dashboard、Details、Settings 三个页面，一个共享的 catalog 请求，还有 Ctrl+Q 退出。先给最小改造方案并改代码。",
+      "expected_output": "移除中央 Action 枚举和 dispatcher；用 Context 放共享 catalog Task；页面本地 KeyMap 和 PageEvent 处理输入与导航；Ctrl+Q 用 App::bind_global；保留现有页面行为。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我的 ratail 页面里 Task 加载完数据后不刷新，必须再按一下键才显示。帮我查一下哪里用错了。",
+      "expected_output": "定位到 Task::new() 或没有共享 Redraw 的问题；改用 Task::with_redraw(&ctx.redraw)；确认 spawn_once 在 tokio runtime 内调用，并说明 snapshot 和 Redraw 的关系。",
+      "files": []
+    }
+  ]
+}
