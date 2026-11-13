@@ -31,6 +31,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | --- | --- |
 | `Context` | Typed services shared by every page, plus the route type and repaint signal |
 | `Task<T, E>` | Cloneable observable async task with `Idle`, `Loading`, `Ready`, `Error`, and `Cancelled` snapshots |
+| `TaskCache<K, T, E>` | Keyed task cache sharing one `Redraw`; each key keeps an independent snapshot |
 | `Page` | Route-local state, key handling, and rendering |
 | `PageEvent` | The page's answer to a key: ignored, handled, or a navigation intent |
 | `Navigator` | Route stack and page lifecycle (`init`, `resume`, `pause`, `dispose`) |
@@ -80,8 +81,8 @@ impl Page<Services> for Dashboard {
         }
     }
 
-    fn keybindings(&self) -> &[KeyHint] {
-        self.keys.hints()
+    fn keybindings(&self) -> Vec<KeyHint> {
+        self.keys.hints().to_vec()
     }
 
     fn render(&mut self, ctx: &Services, frame: &mut Frame, area: Rect) {
@@ -109,6 +110,25 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+### Custom hint rendering
+
+The default footer is one line of key/description pairs. Replace it when the app
+needs a different layout or theme:
+
+```rust
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Paragraph, Widget};
+
+app.set_hint_renderer(|_ctx, hints, area, buf| {
+    Paragraph::new(ratail::hint_line(hints))
+        .style(Style::default().fg(Color::Gray))
+        .render(area, buf);
+});
+```
+
+`hint_line` builds the default spans, so a custom renderer can restyle them or
+draw any other widget in the footer area.
+
 The quit key is application policy, so it sits in the application. Another app can use `Esc`, `q`, or no quit key at all.
 
 ## Shared async state
@@ -132,6 +152,47 @@ impl Services {
 - `Loading` and `Error` keep the previous value, so a page can show stale data next to an error.
 - `snapshot()` returns the current state. `value()`, `previous()`, and `error()` cover the usual reads.
 - Identity is `Arc`-based, so there are no task IDs to allocate or overflow.
+
+### Parameterized requests
+
+When the request depends on a parameter, such as a driver, account, or route id, use `TaskCache`. Every key behaves like a separate `Task`, so results for different parameters never overwrite each other. Think of it as a keyed query cache, not as React's `useEffect` dependency list: entries are retained until you remove them.
+
+```rust
+struct Services {
+    redraw: Redraw,
+    catalogs: TaskCache<Driver, Catalog, Error>,
+}
+
+impl Services {
+    fn catalog(&self, driver: Driver) -> Task<Catalog, Error> {
+        self.catalogs.get_or_create(&driver)
+    }
+
+    fn load_catalog(&self, driver: Driver) -> bool {
+        self.catalogs.spawn_once(driver, load_catalog)
+    }
+}
+
+async fn load_catalog(driver: Driver) -> Result<Catalog, Error> {
+    // fetch the catalog for this driver
+}
+```
+
+`spawn_once` takes the key and passes it to the request function. Switching a page to another key reads that key's snapshot instead of replacing the previous result.
+
+Call `remove` or `clear` when a key is no longer needed; both cancel in-flight requests. `snapshot` returns `None` for keys that were never requested, so rendering stays free of hidden cache writes.
+
+For several parameters, use a tuple or a struct as the key:
+
+```rust
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct CatalogKey {
+    driver: Driver,
+    game_version: String,
+}
+
+let catalogs: TaskCache<CatalogKey, Catalog, Error> = TaskCache::new(&redraw);
+```
 
 Reading a snapshot stays explicit:
 

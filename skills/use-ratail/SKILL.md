@@ -54,6 +54,27 @@ Create tasks that should repaint with `Task::with_redraw(&ctx.redraw)`. `Task::n
 
 Store a task in the context when several pages need the same result. A page-local task is also valid if it has a `Redraw`.
 
+When the request depends on a parameter (driver, account, route id), use `TaskCache<K, T, E>` instead of one shared `Task`. It is a keyed query cache, not a `useEffect` dependency list: entries persist until `remove` or `clear`. Each key keeps its own snapshot, so switching parameters never overwrites another result. `spawn_once` takes the key and passes it to the request function:
+
+```rust
+struct Services {
+    redraw: Redraw,
+    catalogs: TaskCache<Driver, Catalog, Error>,
+}
+
+impl Services {
+    fn catalog(&self, driver: Driver) -> Task<Catalog, Error> {
+        self.catalogs.get_or_create(&driver)
+    }
+
+    fn load_catalog(&self, driver: Driver) -> bool {
+        self.catalogs.spawn_once(driver, load_catalog)
+    }
+}
+```
+
+For multiple parameters, use a tuple or a struct deriving `Clone + Eq + Hash` as the key. Use `snapshot` to read without creating an entry, and `remove`/`clear` to cancel and evict when the key space can grow.
+
 ```rust
 match &*ctx.catalog.snapshot() {
     Snapshot::Idle => {}
@@ -84,6 +105,7 @@ match self.keys.action_for(&key) {
 - `PageEvent::Navigate` applies navigation and stops global handling.
 - `KeyMap::bind` panics on a duplicate chord. Release events are ignored; press and repeat both resolve.
 - Render hints with `keybindings()`. `App` merges page hints and global hints into one footer line. With no hints, the page gets the full frame area.
+- Replace the footer with `App::set_hint_renderer` when the app needs custom layout or styling; `hint_line` exposes the default spans.
 
 Global keys return `AppFlow`:
 

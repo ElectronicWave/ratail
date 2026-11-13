@@ -28,8 +28,10 @@ pub trait Page<C: Context> {
         PageEvent::Ignored
     }
 
-    fn keybindings(&self) -> &[KeyHint] {
-        &[]
+    /// Hints for the current page. This is called on every frame, so pages can
+    /// regenerate localized hints when the active locale changes.
+    fn keybindings(&self) -> Vec<KeyHint> {
+        Vec::new()
     }
 
     fn render(&mut self, ctx: &C, frame: &mut Frame, area: Rect);

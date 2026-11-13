@@ -19,11 +19,13 @@ pub mod navigator;
 pub mod page;
 pub mod redraw;
 pub mod task;
+pub mod task_cache;
 
-pub use app::{App, AppFlow};
+pub use app::{App, AppFlow, hint_line};
 pub use context::Context;
 pub use input::{FocusRing, KeyChord, KeyHint, KeyMap};
 pub use navigator::{NavAction, Navigator, Router};
 pub use page::{Page, PageEvent};
 pub use redraw::Redraw;
 pub use task::{Snapshot, Task};
+pub use task_cache::TaskCache;

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// A normalized key press. Release events are ignored; press and repeat are kept
@@ -37,16 +39,41 @@ impl KeyChord {
     }
 }
 
-/// A key binding hint that can be rendered in a title bar.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A key binding hint that can be rendered in a footer.
+///
+/// `key` and `description` accept owned or borrowed text, so translations
+/// produced by crates such as `rust-i18n` can be used directly:
+/// `rust_i18n::t!(...)` returns `Cow<'static, str>` and fits both arguments.
+///
+/// ```
+/// use ratail::KeyHint;
+///
+/// let hint = KeyHint::new("Ctrl+Q", String::from("quit"));
+/// assert_eq!(hint.description, "quit");
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyHint {
-    pub key: &'static str,
-    pub description: &'static str,
+    pub key: Cow<'static, str>,
+    pub description: Cow<'static, str>,
 }
 
 impl KeyHint {
-    pub const fn new(key: &'static str, description: &'static str) -> Self {
-        Self { key, description }
+    pub fn new(
+        key: impl Into<Cow<'static, str>>,
+        description: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            description: description.into(),
+        }
+    }
+
+    /// Creates a hint from static text without allocating.
+    pub const fn from_static(key: &'static str, description: &'static str) -> Self {
+        Self {
+            key: Cow::Borrowed(key),
+            description: Cow::Borrowed(description),
+        }
     }
 }
 

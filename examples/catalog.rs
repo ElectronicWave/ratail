@@ -142,8 +142,8 @@ impl Page<Services> for CatalogPage {
         }
     }
 
-    fn keybindings(&self) -> &[KeyHint] {
-        self.keys.hints()
+    fn keybindings(&self) -> Vec<KeyHint> {
+        self.keys.hints().to_vec()
     }
 
     fn on_key(&mut self, ctx: &Services, key: KeyEvent) -> PageEvent<Route> {

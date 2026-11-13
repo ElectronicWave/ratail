@@ -3,8 +3,9 @@ use std::future::poll_fn;
 use futures_core::Stream;
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event, EventStream, KeyEvent};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -25,6 +26,7 @@ pub struct App<C: Context, R: Router<C>> {
     context: C,
     navigator: Navigator<C, R>,
     globals: Vec<GlobalBinding<C>>,
+    hint_renderer: Option<Box<HintRenderer<C>>>,
 }
 
 struct GlobalBinding<C: Context> {
@@ -32,6 +34,8 @@ struct GlobalBinding<C: Context> {
     hint: KeyHint,
     action: Box<dyn FnMut(&mut C) -> AppFlow>,
 }
+
+type HintRenderer<C> = dyn FnMut(&C, &[KeyHint], Rect, &mut Buffer);
 
 impl<C: Context, R: Router<C>> App<C, R> {
     pub fn new(context: C, router: R, root: C::Route) -> Self {
@@ -41,6 +45,7 @@ impl<C: Context, R: Router<C>> App<C, R> {
             context,
             navigator,
             globals: Vec::new(),
+            hint_renderer: None,
         }
     }
 
@@ -70,6 +75,18 @@ impl<C: Context, R: Router<C>> App<C, R> {
             hint,
             action: Box::new(action),
         });
+    }
+
+    /// Replaces the default one-line footer hint renderer.
+    ///
+    /// The renderer receives the application context, the merged page and
+    /// global hints, and the footer area. Use [`hint_line`] to keep the default
+    /// layout and restyle its spans, or draw a completely different widget.
+    pub fn set_hint_renderer<F>(&mut self, renderer: F)
+    where
+        F: FnMut(&C, &[KeyHint], Rect, &mut Buffer) + 'static,
+    {
+        self.hint_renderer = Some(Box::new(renderer));
     }
 
     /// Runs the application on the current tokio runtime.
@@ -150,27 +167,32 @@ impl<C: Context, R: Router<C>> App<C, R> {
         if let Some(page) = self.navigator.current_mut() {
             page.render(&self.context, frame, body);
         }
-        frame.render_widget(Paragraph::new(hints_line(&hints)), footer);
+
+        match &mut self.hint_renderer {
+            Some(renderer) => renderer(&self.context, &hints, footer, frame.buffer_mut()),
+            None => frame.render_widget(Paragraph::new(hint_line(&hints)), footer),
+        }
     }
 
     fn hints(&self) -> Vec<KeyHint> {
         let mut hints = Vec::new();
         if let Some(page) = self.navigator.current() {
-            hints.extend_from_slice(page.keybindings());
+            hints.extend(page.keybindings());
         }
-        hints.extend(self.globals.iter().map(|binding| binding.hint));
+        hints.extend(self.globals.iter().map(|binding| binding.hint.clone()));
         hints
     }
 }
 
-fn hints_line(hints: &[KeyHint]) -> Line<'static> {
+/// Builds the default footer line from merged hints.
+pub fn hint_line(hints: &[KeyHint]) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, hint) in hints.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(
-            hint.key,
+            hint.key.clone(),
             Style::default().add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(format!(" {}", hint.description)));

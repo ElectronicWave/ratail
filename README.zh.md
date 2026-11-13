@@ -31,6 +31,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | --- | --- |
 | `Context` | 所有页面共享的带类型服务，以及路由类型和重绘信号 |
 | `Task<T, E>` | 可克隆、可观察的异步任务，快照包含 `Idle`、`Loading`、`Ready`、`Error` 和 `Cancelled` |
+| `TaskCache<K, T, E>` | 带键的任务缓存，共用同一个 `Redraw`，每个键维护独立快照 |
 | `Page` | 路由内的状态、按键处理和渲染 |
 | `PageEvent` | 页面对一次按键的回答：忽略、已处理，或导航意图 |
 | `Navigator` | 路由栈和页面生命周期（`init`、`resume`、`pause`、`dispose`） |
@@ -80,8 +81,8 @@ impl Page<Services> for Dashboard {
         }
     }
 
-    fn keybindings(&self) -> &[KeyHint] {
-        self.keys.hints()
+    fn keybindings(&self) -> Vec<KeyHint> {
+        self.keys.hints().to_vec()
     }
 
     fn render(&mut self, ctx: &Services, frame: &mut Frame, area: Rect) {
@@ -109,6 +110,23 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
+### 自定义 hint 渲染
+
+默认 footer 是一行按键与说明。需要不同布局或主题时可以替换渲染器：
+
+```rust
+use ratatui::style::{Color, Style};
+use ratatui::widgets::{Paragraph, Widget};
+
+app.set_hint_renderer(|_ctx, hints, area, buf| {
+    Paragraph::new(ratail::hint_line(hints))
+        .style(Style::default().fg(Color::Gray))
+        .render(area, buf);
+});
+```
+
+`hint_line` 会生成默认的 spans，自定义渲染器可以基于它重新着色，也可以完全绘制别的 widget。
+
 退出键属于应用自己的策略，所以放在应用里。别的应用可以用 `Esc`、`q`，也可以不绑定退出键。
 
 ## 共享异步状态
@@ -132,6 +150,47 @@ impl Services {
 - `Loading` 和 `Error` 会保留上一次的值，页面可以在报错时继续显示旧数据。
 - `snapshot()` 返回当前状态，`value()`、`previous()` 和 `error()` 覆盖常见的读法。
 - 身份基于 `Arc`，不需要分配任务 ID，也不用担心 ID 溢出。
+
+### 带参数的请求
+
+请求依赖某个参数时，比如 driver、账号或路由 ID，使用 `TaskCache`。每个键都相当于一个独立的 `Task`，不同参数的结果不会互相覆盖。它更像按 key 查询的缓存，而不是 React 的 `useEffect` 依赖列表：条目会一直保留，直到你主动移除。
+
+```rust
+struct Services {
+    redraw: Redraw,
+    catalogs: TaskCache<Driver, Catalog, Error>,
+}
+
+impl Services {
+    fn catalog(&self, driver: Driver) -> Task<Catalog, Error> {
+        self.catalogs.get_or_create(&driver)
+    }
+
+    fn load_catalog(&self, driver: Driver) -> bool {
+        self.catalogs.spawn_once(driver, load_catalog)
+    }
+}
+
+async fn load_catalog(driver: Driver) -> Result<Catalog, Error> {
+    // 拉取这个 driver 的 catalog
+}
+```
+
+`spawn_once` 接收 key，并把它传给请求函数。页面切换到另一个 key 时读取的是那个 key 的快照，不会覆盖之前的结果。
+
+某个 key 不再需要时调用 `remove` 或 `clear`，两者都会取消进行中的请求。`snapshot` 对从未请求过的 key 返回 `None`，渲染路径不会偷偷写入缓存。
+
+多个参数时，直接用元组或结构体作为 key：
+
+```rust
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct CatalogKey {
+    driver: Driver,
+    game_version: String,
+}
+
+let catalogs: TaskCache<CatalogKey, Catalog, Error> = TaskCache::new(&redraw);
+```
 
 读取快照仍然是显式的：
 

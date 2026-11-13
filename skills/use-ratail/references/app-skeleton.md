@@ -98,8 +98,8 @@ impl Page<Services> for HomePage {
         ctx.reload();
     }
 
-    fn keybindings(&self) -> &[KeyHint] {
-        self.keys.hints()
+    fn keybindings(&self) -> Vec<KeyHint> {
+        self.keys.hints().to_vec()
     }
 
     fn on_key(&mut self, ctx: &Services, key: KeyEvent) -> PageEvent<Route> {
@@ -129,8 +129,8 @@ impl Page<Services> for HomePage {
 struct DetailsPage;
 
 impl Page<Services> for DetailsPage {
-    fn keybindings(&self) -> &[KeyHint] {
-        &[]
+    fn keybindings(&self) -> Vec<KeyHint> {
+        Vec::new()
     }
 
     fn on_key(&mut self, _ctx: &Services, key: KeyEvent) -> PageEvent<Route> {
@@ -163,7 +163,9 @@ async fn main() -> std::io::Result<()> {
 ## Variations
 
 - Shared task across routes: keep the `Task` in `Services` and read the same snapshot from each page.
+- Parameterized request: store a `TaskCache<K, T, E>` in `Services` when each key needs its own snapshot, such as a catalog per driver. Treat it as a cache and evict keys that can grow without bound.
 - Page-local task: store the `Task` in the page and create it with `Task::with_redraw(&ctx.redraw)`.
 - No action enum: match `KeyEvent` directly in `on_key` and still return `PageEvent`.
 - Global key that mutates services: use `App::bind_global` with a closure over `&mut C`; return `AppFlow::Exit` only when the app should stop.
+- Custom footer: call `App::set_hint_renderer` and draw any widget in the footer area; `hint_line` builds the default spans.
 - Error with stale data: render `snapshot.error()` and `snapshot.previous()` together instead of clearing the screen.
