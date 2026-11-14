@@ -123,7 +123,7 @@ impl<C: Context, R: Router<C>> App<C, R> {
     fn handle_key(&mut self, key: KeyEvent) -> AppFlow {
         let chord = KeyChord::from_event(&key);
         let event = match self.navigator.current_mut() {
-            Some(page) => page.on_key(&self.context, key),
+            Some((route, page)) => page.on_key(&self.context, route, key),
             None => PageEvent::Ignored,
         };
 
@@ -155,8 +155,8 @@ impl<C: Context, R: Router<C>> App<C, R> {
         let area = frame.area();
 
         if hints.is_empty() {
-            if let Some(page) = self.navigator.current_mut() {
-                page.render(&self.context, frame, area);
+            if let Some((route, page)) = self.navigator.current_mut() {
+                page.render(&self.context, route, frame, area);
             }
             return;
         }
@@ -164,8 +164,8 @@ impl<C: Context, R: Router<C>> App<C, R> {
         let [body, footer] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
-        if let Some(page) = self.navigator.current_mut() {
-            page.render(&self.context, frame, body);
+        if let Some((route, page)) = self.navigator.current_mut() {
+            page.render(&self.context, route, frame, body);
         }
 
         match &mut self.hint_renderer {
@@ -176,8 +176,8 @@ impl<C: Context, R: Router<C>> App<C, R> {
 
     fn hints(&self) -> Vec<KeyHint> {
         let mut hints = Vec::new();
-        if let Some(page) = self.navigator.current() {
-            hints.extend(page.keybindings());
+        if let Some((route, page)) = self.navigator.current() {
+            hints.extend(page.keybindings(route));
         }
         hints.extend(self.globals.iter().map(|binding| binding.hint.clone()));
         hints

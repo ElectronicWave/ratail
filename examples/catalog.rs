@@ -80,85 +80,78 @@ async fn load_catalog(request: usize) -> Result<Catalog, String> {
 struct AppRouter;
 
 impl Router<Services> for AppRouter {
-    fn create(&mut self, route: &Route, _ctx: &Services) -> Box<dyn Page<Services>> {
-        Box::new(CatalogPage::new(*route))
+    fn create(&mut self, _route: &Route, _ctx: &Services) -> Box<dyn Page<Services>> {
+        Box::new(CatalogPage::new())
     }
 }
 
 struct CatalogPage {
-    route: Route,
     keys: KeyMap<Action>,
 }
 
+const DETAILS_HINT: KeyHint = KeyHint::from_static("d", "details");
+const BACK_HINT: KeyHint = KeyHint::from_static("Backspace", "back");
+const RELOAD_HINT: KeyHint = KeyHint::from_static("r", "reload");
+
 impl CatalogPage {
-    fn new(route: Route) -> Self {
+    fn new() -> Self {
         let mut keys = KeyMap::new();
-        match route {
-            Route::Dashboard => {
-                bind(
-                    &mut keys,
-                    KeyChord::char('d'),
-                    Action::Details,
-                    "d",
-                    "details",
-                );
-            }
-            Route::Details => {
-                bind(
-                    &mut keys,
-                    KeyChord::plain(KeyCode::Backspace),
-                    Action::Back,
-                    "Backspace",
-                    "back",
-                );
-            }
-        }
+        bind(
+            &mut keys,
+            KeyChord::char('d'),
+            Action::Details,
+            DETAILS_HINT.clone(),
+        );
+        bind(
+            &mut keys,
+            KeyChord::plain(KeyCode::Backspace),
+            Action::Back,
+            BACK_HINT.clone(),
+        );
         bind(
             &mut keys,
             KeyChord::char('r'),
             Action::Reload,
-            "r",
-            "reload",
+            RELOAD_HINT.clone(),
         );
 
-        Self { route, keys }
+        Self { keys }
     }
 }
 
-fn bind(
-    keys: &mut KeyMap<Action>,
-    chord: KeyChord,
-    action: Action,
-    key: &'static str,
-    description: &'static str,
-) {
-    keys.bind_with_hint(chord, action, KeyHint::new(key, description));
+fn bind(keys: &mut KeyMap<Action>, chord: KeyChord, action: Action, hint: KeyHint) {
+    keys.bind_with_hint(chord, action, hint);
 }
 
 impl Page<Services> for CatalogPage {
-    fn init(&mut self, ctx: &Services) {
-        if self.route == Route::Dashboard {
+    fn init(&mut self, ctx: &Services, route: &Route) {
+        if *route == Route::Dashboard {
             ctx.reload();
         }
     }
 
-    fn keybindings(&self) -> Vec<KeyHint> {
-        self.keys.hints().to_vec()
+    fn keybindings(&self, route: &Route) -> Vec<KeyHint> {
+        match route {
+            Route::Dashboard => vec![DETAILS_HINT.clone(), RELOAD_HINT.clone()],
+            Route::Details => vec![BACK_HINT.clone(), RELOAD_HINT.clone()],
+        }
     }
 
-    fn on_key(&mut self, ctx: &Services, key: KeyEvent) -> PageEvent<Route> {
+    fn on_key(&mut self, ctx: &Services, route: &Route, key: KeyEvent) -> PageEvent<Route> {
         match self.keys.action_for(&key) {
             Some(Action::Reload) => {
                 ctx.reload();
                 PageEvent::Handled
             }
-            Some(Action::Details) => PageEvent::Navigate(NavAction::Push(Route::Details)),
-            Some(Action::Back) => PageEvent::Navigate(NavAction::Pop),
-            None => PageEvent::Ignored,
+            Some(Action::Details) if *route == Route::Dashboard => {
+                PageEvent::Navigate(NavAction::Push(Route::Details))
+            }
+            Some(Action::Back) if *route == Route::Details => PageEvent::Navigate(NavAction::Pop),
+            _ => PageEvent::Ignored,
         }
     }
 
-    fn render(&mut self, ctx: &Services, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(vec![
             Span::styled("Catalog", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(format!(

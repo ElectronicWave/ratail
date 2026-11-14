@@ -94,15 +94,15 @@ impl HomePage {
 }
 
 impl Page<Services> for HomePage {
-    fn init(&mut self, ctx: &Services) {
+    fn init(&mut self, ctx: &Services, _route: &Route) {
         ctx.reload();
     }
 
-    fn keybindings(&self) -> Vec<KeyHint> {
+    fn keybindings(&self, _route: &Route) -> Vec<KeyHint> {
         self.keys.hints().to_vec()
     }
 
-    fn on_key(&mut self, ctx: &Services, key: KeyEvent) -> PageEvent<Route> {
+    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
         match self.keys.action_for(&key) {
             Some(HomeAction::Reload) => {
                 ctx.reload();
@@ -113,7 +113,7 @@ impl Page<Services> for HomePage {
         }
     }
 
-    fn render(&mut self, ctx: &Services, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
         let text = match &*ctx.items.snapshot() {
             Snapshot::Idle => "idle".to_string(),
             Snapshot::Loading { .. } => "loading".to_string(),
@@ -129,11 +129,11 @@ impl Page<Services> for HomePage {
 struct DetailsPage;
 
 impl Page<Services> for DetailsPage {
-    fn keybindings(&self) -> Vec<KeyHint> {
+    fn keybindings(&self, _route: &Route) -> Vec<KeyHint> {
         Vec::new()
     }
 
-    fn on_key(&mut self, _ctx: &Services, key: KeyEvent) -> PageEvent<Route> {
+    fn on_key(&mut self, _ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
         if key.code == KeyCode::Backspace {
             PageEvent::Navigate(NavAction::Pop)
         } else {
@@ -141,7 +141,7 @@ impl Page<Services> for DetailsPage {
         }
     }
 
-    fn render(&mut self, _ctx: &Services, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, _ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new("details"), area);
     }
 }

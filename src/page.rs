@@ -16,23 +16,23 @@ pub enum PageEvent<R> {
 
 /// A route's page state and behavior.
 pub trait Page<C: Context> {
-    fn init(&mut self, _ctx: &C) {}
+    fn init(&mut self, _ctx: &C, _route: &C::Route) {}
 
-    fn resume(&mut self, _ctx: &C) {}
+    fn resume(&mut self, _ctx: &C, _route: &C::Route) {}
 
-    fn pause(&mut self, _ctx: &C) {}
+    fn pause(&mut self, _ctx: &C, _route: &C::Route) {}
 
-    fn dispose(&mut self, _ctx: &C) {}
+    fn dispose(&mut self, _ctx: &C, _route: &C::Route) {}
 
-    fn on_key(&mut self, _ctx: &C, _key: KeyEvent) -> PageEvent<C::Route> {
+    fn on_key(&mut self, _ctx: &C, _route: &C::Route, _key: KeyEvent) -> PageEvent<C::Route> {
         PageEvent::Ignored
     }
 
     /// Hints for the current page. This is called on every frame, so pages can
     /// regenerate localized hints when the active locale changes.
-    fn keybindings(&self) -> Vec<KeyHint> {
+    fn keybindings(&self, _route: &C::Route) -> Vec<KeyHint> {
         Vec::new()
     }
 
-    fn render(&mut self, ctx: &C, frame: &mut Frame, area: Rect);
+    fn render(&mut self, ctx: &C, route: &C::Route, frame: &mut Frame, area: Rect);
 }

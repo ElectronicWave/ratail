@@ -27,5 +27,5 @@ pub use input::{FocusRing, KeyChord, KeyHint, KeyMap};
 pub use navigator::{NavAction, Navigator, Router};
 pub use page::{Page, PageEvent};
 pub use redraw::Redraw;
-pub use task::{Snapshot, Task};
+pub use task::{Snapshot, SnapshotStatus, SnapshotView, Task};
 pub use task_cache::TaskCache;

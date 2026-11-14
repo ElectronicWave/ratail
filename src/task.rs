@@ -24,6 +24,27 @@ pub enum Snapshot<T, E> {
     },
 }
 
+/// Lifecycle state of a [`Snapshot`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotStatus {
+    Idle,
+    Loading,
+    Ready,
+    Error,
+    Cancelled,
+}
+
+/// A flat view of a [`Snapshot`].
+///
+/// `data` is the newest available value, so a page can render stale data while
+/// a request is loading or after an error. `error` is populated for `Error`
+/// regardless of whether `data` is present.
+pub struct SnapshotView<'a, T, E> {
+    pub status: SnapshotStatus,
+    pub data: Option<&'a Arc<T>>,
+    pub error: Option<&'a Arc<E>>,
+}
+
 impl<T, E> Snapshot<T, E> {
     pub fn value(&self) -> Option<&Arc<T>> {
         match self {
@@ -45,6 +66,40 @@ impl<T, E> Snapshot<T, E> {
         match self {
             Self::Error { error, .. } => Some(error),
             _ => None,
+        }
+    }
+
+    /// Flattens the snapshot into status, data, and error.
+    ///
+    /// Unlike reading only the data, this keeps the error visible when a
+    /// previous value is rendered.
+    pub fn view(&self) -> SnapshotView<'_, T, E> {
+        match self {
+            Self::Idle => SnapshotView {
+                status: SnapshotStatus::Idle,
+                data: None,
+                error: None,
+            },
+            Self::Loading { previous } => SnapshotView {
+                status: SnapshotStatus::Loading,
+                data: previous.as_ref(),
+                error: None,
+            },
+            Self::Ready(value) => SnapshotView {
+                status: SnapshotStatus::Ready,
+                data: Some(value),
+                error: None,
+            },
+            Self::Error { error, previous } => SnapshotView {
+                status: SnapshotStatus::Error,
+                data: previous.as_ref(),
+                error: Some(error),
+            },
+            Self::Cancelled { previous } => SnapshotView {
+                status: SnapshotStatus::Cancelled,
+                data: previous.as_ref(),
+                error: None,
+            },
         }
     }
 }

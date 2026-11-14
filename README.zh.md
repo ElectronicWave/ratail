@@ -70,7 +70,7 @@ let catalog = Task::with_redraw(&redraw);
 
 ```rust
 impl Page<Services> for Dashboard {
-    fn on_key(&mut self, ctx: &Services, key: KeyEvent) -> PageEvent<Route> {
+    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
         match self.keys.action_for(&key) {
             Some(Action::Reload) => {
                 ctx.catalog.spawn_once(load_catalog);
@@ -81,11 +81,11 @@ impl Page<Services> for Dashboard {
         }
     }
 
-    fn keybindings(&self) -> Vec<KeyHint> {
+    fn keybindings(&self, _route: &Route) -> Vec<KeyHint> {
         self.keys.hints().to_vec()
     }
 
-    fn render(&mut self, ctx: &Services, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
         draw_catalog(&ctx.catalog.snapshot(), frame, area);
     }
 }
@@ -148,7 +148,7 @@ impl Services {
 - `Task` 克隆很便宜，可以放进服务里。
 - 已经有任务在跑时，`spawn_once` 不会再启动一次。
 - `Loading` 和 `Error` 会保留上一次的值，页面可以在报错时继续显示旧数据。
-- `snapshot()` 返回当前状态，`value()`、`previous()` 和 `error()` 覆盖常见的读法。
+- `snapshot()` 返回当前状态，`value()`、`previous()` 和 `error()` 覆盖常见的读法；需要同时渲染旧数据和错误时用 `view()` 摊平状态、数据和错误。
 - 身份基于 `Arc`，不需要分配任务 ID，也不用担心 ID 溢出。
 
 ### 带参数的请求
@@ -201,6 +201,20 @@ match &*ctx.catalog.snapshot() {
     Snapshot::Ready(catalog) => {}
     Snapshot::Error { error, previous } => {}
     Snapshot::Cancelled { previous } => {}
+}
+```
+
+需要同时渲染旧数据和错误时，先把快照摊平。`view()` 即使 `data` 来自上一次结果，也会保留 `error`：
+
+```rust
+let snapshot = ctx.catalog.snapshot();
+let view = snapshot.view();
+
+if let Some(catalog) = view.data {
+    draw_catalog(catalog, frame, area);
+}
+if let Some(error) = view.error {
+    draw_error(error, frame, area);
 }
 ```
 
@@ -273,7 +287,7 @@ struct Services {
     catalog: Task<Catalog, String>,
 }
 
-fn on_key(&mut self, ctx: &Services, key: KeyEvent) -> PageEvent<Route> {
+fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
     match self.keys.action_for(&key) {
         Some(Action::Reload) => {
             ctx.catalog.spawn_once(load_catalog);

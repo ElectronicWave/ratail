@@ -70,7 +70,7 @@ let catalog = Task::with_redraw(&redraw);
 
 ```rust
 impl Page<Services> for Dashboard {
-    fn on_key(&mut self, ctx: &Services, key: KeyEvent) -> PageEvent<Route> {
+    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
         match self.keys.action_for(&key) {
             Some(Action::Reload) => {
                 ctx.catalog.spawn_once(load_catalog);
@@ -81,11 +81,11 @@ impl Page<Services> for Dashboard {
         }
     }
 
-    fn keybindings(&self) -> Vec<KeyHint> {
+    fn keybindings(&self, _route: &Route) -> Vec<KeyHint> {
         self.keys.hints().to_vec()
     }
 
-    fn render(&mut self, ctx: &Services, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
         draw_catalog(&ctx.catalog.snapshot(), frame, area);
     }
 }
@@ -150,7 +150,7 @@ impl Services {
 - Cloning a `Task` is cheap enough to store it in a service.
 - `spawn_once` does nothing while a run is already in flight.
 - `Loading` and `Error` keep the previous value, so a page can show stale data next to an error.
-- `snapshot()` returns the current state. `value()`, `previous()`, and `error()` cover the usual reads.
+- `snapshot()` returns the current state. `value()`, `previous()`, and `error()` cover the usual reads; `view()` flattens status, data, and error when stale data and an error must be rendered together.
 - Identity is `Arc`-based, so there are no task IDs to allocate or overflow.
 
 ### Parameterized requests
@@ -203,6 +203,20 @@ match &*ctx.catalog.snapshot() {
     Snapshot::Ready(catalog) => {}
     Snapshot::Error { error, previous } => {}
     Snapshot::Cancelled { previous } => {}
+}
+```
+
+When a page renders stale data and errors together, flatten the snapshot first. `view()` keeps the error visible even when `data` comes from the previous result:
+
+```rust
+let snapshot = ctx.catalog.snapshot();
+let view = snapshot.view();
+
+if let Some(catalog) = view.data {
+    draw_catalog(catalog, frame, area);
+}
+if let Some(error) = view.error {
+    draw_error(error, frame, area);
 }
 ```
 
@@ -275,7 +289,7 @@ struct Services {
     catalog: Task<Catalog, String>,
 }
 
-fn on_key(&mut self, ctx: &Services, key: KeyEvent) -> PageEvent<Route> {
+fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
     match self.keys.action_for(&key) {
         Some(Action::Reload) => {
             ctx.catalog.spawn_once(load_catalog);

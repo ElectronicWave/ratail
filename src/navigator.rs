@@ -27,8 +27,8 @@ struct RouteEntry<C: Context> {
 impl<C: Context, R: Router<C>> Navigator<C, R> {
     pub fn new(mut router: R, root: C::Route, ctx: &C) -> Self {
         let mut page = router.create(&root, ctx);
-        page.init(ctx);
-        page.resume(ctx);
+        page.init(ctx, &root);
+        page.resume(ctx, &root);
 
         Self {
             router,
@@ -49,12 +49,12 @@ impl<C: Context, R: Router<C>> Navigator<C, R> {
 
     pub fn push(&mut self, route: C::Route, ctx: &C) {
         if let Some(current) = self.stack.last_mut() {
-            current.page.pause(ctx);
+            current.page.pause(ctx, &current.route);
         }
 
         let mut page = self.router.create(&route, ctx);
-        page.init(ctx);
-        page.resume(ctx);
+        page.init(ctx, &route);
+        page.resume(ctx, &route);
 
         self.stack.push(RouteEntry { route, page });
     }
@@ -68,12 +68,12 @@ impl<C: Context, R: Router<C>> Navigator<C, R> {
         }
 
         if let Some(mut entry) = self.stack.pop() {
-            entry.page.pause(ctx);
-            entry.page.dispose(ctx);
+            entry.page.pause(ctx, &entry.route);
+            entry.page.dispose(ctx, &entry.route);
         }
 
         if let Some(current) = self.stack.last_mut() {
-            current.page.resume(ctx);
+            current.page.resume(ctx, &current.route);
         }
 
         true
@@ -81,36 +81,42 @@ impl<C: Context, R: Router<C>> Navigator<C, R> {
 
     pub fn replace(&mut self, route: C::Route, ctx: &C) {
         if let Some(mut current) = self.stack.pop() {
-            current.page.pause(ctx);
-            current.page.dispose(ctx);
+            current.page.pause(ctx, &current.route);
+            current.page.dispose(ctx, &current.route);
         }
 
         let mut page = self.router.create(&route, ctx);
-        page.init(ctx);
-        page.resume(ctx);
+        page.init(ctx, &route);
+        page.resume(ctx, &route);
 
         self.stack.push(RouteEntry { route, page });
     }
 
     pub fn reset(&mut self, route: C::Route, ctx: &C) {
         while let Some(mut entry) = self.stack.pop() {
-            entry.page.pause(ctx);
-            entry.page.dispose(ctx);
+            entry.page.pause(ctx, &entry.route);
+            entry.page.dispose(ctx, &entry.route);
         }
 
         let mut page = self.router.create(&route, ctx);
-        page.init(ctx);
-        page.resume(ctx);
+        page.init(ctx, &route);
+        page.resume(ctx, &route);
 
         self.stack.push(RouteEntry { route, page });
     }
 
-    pub fn current(&self) -> Option<&(dyn Page<C> + 'static)> {
-        self.stack.last().map(|entry| entry.page.as_ref())
+    /// Borrows the current route together with its page.
+    pub fn current(&self) -> Option<(&C::Route, &(dyn Page<C> + 'static))> {
+        self.stack
+            .last()
+            .map(|entry| (&entry.route, entry.page.as_ref()))
     }
 
-    pub fn current_mut(&mut self) -> Option<&mut (dyn Page<C> + 'static)> {
-        self.stack.last_mut().map(|entry| entry.page.as_mut())
+    /// Mutably borrows the current route together with its page.
+    pub fn current_mut(&mut self) -> Option<(&C::Route, &mut (dyn Page<C> + 'static))> {
+        self.stack
+            .last_mut()
+            .map(|entry| (&entry.route, entry.page.as_mut()))
     }
 
     pub fn current_route(&self) -> Option<&C::Route> {

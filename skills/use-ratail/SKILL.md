@@ -49,6 +49,7 @@ Create tasks that should repaint with `Task::with_redraw(&ctx.redraw)`. `Task::n
 - `Snapshot` is `Idle`, `Loading { previous }`, `Ready(Arc<T>)`, `Error { error, previous }`, or `Cancelled { previous }`.
 - `Loading` and `Error` retain the previous value. Read it with `snapshot.previous()` and render stale data next to the error.
 - `value()` returns data only for `Ready`; `error()` returns an error only for `Error`.
+- `view()` returns `SnapshotView { status, data, error }`. `data` is `Ready` data or the retained previous value, and `error` remains visible when stale data is rendered.
 - `cancel()` records `Cancelled`; `reset()` returns `false` while a run is active.
 - A task keeps one latest result. Progress streams, retry queues, and multiple consumers belong in a service, not in `Task`.
 
@@ -89,14 +90,31 @@ match &*ctx.catalog.snapshot() {
 
 `Action` is not a ratail type. Define a small `Clone + Copy` enum per page or focus scope, or match `KeyEvent` directly. `KeyMap<A>::action_for` requires `A: Copy`.
 
+Every `Page` method receives the route that owns the page:
+
 ```rust
-match self.keys.action_for(&key) {
-    Some(HomeAction::Reload) => {
-        ctx.reload();
-        PageEvent::Handled
+fn on_key(&mut self, ctx: &Services, route: &Route, key: KeyEvent) -> PageEvent<Route> {
+    match self.keys.action_for(&key) {
+        Some(HomeAction::Reload) => {
+            ctx.reload();
+            PageEvent::Handled
+        }
+        Some(HomeAction::Details) if *route == Route::Home => {
+            PageEvent::Navigate(NavAction::Push(Route::Details))
+        }
+        _ => PageEvent::Ignored,
     }
-    Some(HomeAction::Details) => PageEvent::Navigate(NavAction::Push(Route::Details)),
-    None => PageEvent::Ignored,
+}
+```
+
+Use the passed `route` instead of storing a second copy on the page. A page that serves several routes can branch on it in `on_key`, `keybindings`, and `render` without duplicating navigation state.
+
+```rust
+fn keybindings(&self, route: &Route) -> Vec<KeyHint> {
+    match route {
+        Route::Home => vec![KeyHint::new("d", "details")],
+        Route::Details => vec![KeyHint::new("Esc", "back")],
+    }
 }
 ```
 
@@ -104,7 +122,7 @@ match self.keys.action_for(&key) {
 - `PageEvent::Handled` stops global handling.
 - `PageEvent::Navigate` applies navigation and stops global handling.
 - `KeyMap::bind` panics on a duplicate chord. Release events are ignored; press and repeat both resolve.
-- Render hints with `keybindings()`. `App` merges page hints and global hints into one footer line. With no hints, the page gets the full frame area.
+- Render hints with `keybindings(route)`. `App` merges page hints and global hints into one footer line. With no hints, the page gets the full frame area.
 - Replace the footer with `App::set_hint_renderer` when the app needs custom layout or styling; `hint_line` exposes the default spans.
 
 Global keys return `AppFlow`:
@@ -127,7 +145,7 @@ Keep actions local to the page that handles them. Building one app-wide action e
 - `Replace` pauses and disposes the current page, then creates the new page and calls `init` and `resume`.
 - `Reset` disposes every page, then creates the new root and calls `init` and `resume`.
 
-`init` runs on every page creation, not once per route type. Put repeatable setup there. Use `resume` for work that should run whenever a page becomes visible again.
+Each lifecycle method receives the page's route. `init` runs on every page creation, not once per route type. Put repeatable setup there. Use `resume` for work that should run whenever a page becomes visible again.
 
 ## Runtime behavior
 
