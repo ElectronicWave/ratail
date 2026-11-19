@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 ## What ratail does
 
 - Pages own their state. There is no central app struct collecting every screen's fields.
-- Shared async data is a `Task` you put in the `Context`. Every page reads the same snapshot.
+- Shared async data lives in a domain service inside the `Context`. Every page reads the same snapshot.
 - Tasks wake the event loop through `Redraw` when their snapshot changes, so business state needs no polling interval.
 - A page returns `PageEvent::Navigate` to move; navigation does not go through a channel.
 - Page-local `KeyMap`s carry actions and hints. Global keys are registered as closures.
@@ -29,13 +29,13 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 | Type | Responsibility |
 | --- | --- |
-| `Context` | Typed services shared by every page, plus the route type and repaint signal |
+| `Context` | Composition root for typed domain services, plus the route type and repaint signal |
 | `Task<T, E>` | Cloneable observable async task with `Idle`, `Loading`, `Ready`, `Error`, and `Cancelled` snapshots |
 | `TaskCache<K, T, E>` | Keyed task cache sharing one `Redraw`; each key keeps an independent snapshot |
 | `Page` | Route-local state, key handling, and rendering |
 | `PageEvent` | The page's answer to a key: ignored, handled, or a navigation intent |
 | `Navigator` | Route stack and page lifecycle (`init`, `resume`, `pause`, `dispose`) |
-| `App` | Event loop, page-first key routing, global binds, and automatic hint footer |
+| `App` | Event loop, global-first key routing, page dispatch, and automatic hint footer |
 | `Redraw` | Repaint signal shared by tasks and the application loop |
 
 ## Quick start
@@ -46,25 +46,64 @@ The snippets below sketch the core protocols. A complete, runnable app lives in 
 
 ```rust
 struct Services {
-    redraw: Redraw,
-    catalog: Task<Catalog, String>,
+    ui: UiService,
+    catalog: CatalogService,
+}
+
+impl Services {
+    fn catalog(&self) -> &CatalogService {
+        &self.catalog
+    }
 }
 
 impl Context for Services {
     type Route = Route;
 
     fn redraw(&self) -> &Redraw {
-        &self.redraw
+        self.ui.redraw()
     }
 }
 ```
 
-Create the shared task with the same repaint signal:
+For a multi-domain app, treat `Services` as the composition root. Keep its fields
+private, expose domain services through accessors, and let each service own its
+own tasks:
 
 ```rust
-let redraw = Redraw::new();
-let catalog = Task::with_redraw(&redraw);
+struct UiService {
+    redraw: Redraw,
+}
+
+impl UiService {
+    fn redraw(&self) -> &Redraw {
+        &self.redraw
+    }
+}
+
+struct CatalogService {
+    catalog: Task<Catalog, String>,
+}
+
+impl CatalogService {
+    fn new(redraw: &Redraw) -> Self {
+        Self {
+            catalog: Task::with_redraw(redraw),
+        }
+    }
+
+    fn snapshot(&self) -> Arc<Snapshot<Catalog, String>> {
+        self.catalog.snapshot()
+    }
+
+    fn reload(&self) {
+        self.catalog.spawn_once(load_catalog);
+    }
+}
 ```
+
+Pass the same `Redraw` to every service constructor. Pages call service methods
+such as `ctx.catalog().reload()`; they do not touch `spawn_once` or construct
+tasks directly. A small app with one or two tasks can keep a flat `Services`.
 
 ### A page
 
@@ -73,7 +112,7 @@ impl Page<Services> for Dashboard {
     fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
         match self.keys.action_for(&key) {
             Some(Action::Reload) => {
-                ctx.catalog.spawn_once(load_catalog);
+                ctx.catalog().reload();
                 PageEvent::Handled
             }
             Some(Action::Details) => PageEvent::Navigate(NavAction::Push(Route::Details)),
@@ -86,7 +125,7 @@ impl Page<Services> for Dashboard {
     }
 
     fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
-        draw_catalog(&ctx.catalog.snapshot(), frame, area);
+        draw_catalog(&ctx.catalog().snapshot(), frame, area);
     }
 }
 ```
@@ -110,42 +149,10 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-### Custom hint rendering
-
-The default footer is one line of key/description pairs. Replace it when the app
-needs a different layout or theme:
-
-```rust
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{Paragraph, Widget};
-
-app.set_hint_renderer(|_ctx, hints, area, buf| {
-    Paragraph::new(ratail::hint_line(hints))
-        .style(Style::default().fg(Color::Gray))
-        .render(area, buf);
-});
-```
-
-`hint_line` builds the default spans, so a custom renderer can restyle them or
-draw any other widget in the footer area.
-
-The quit key is application policy, so it sits in the application. Another app can use `Esc`, `q`, or no quit key at all.
-
 ## Shared async state
 
-A `Task` is for calling the same async operation from several places and reading one result.
-
-```rust
-impl Services {
-    fn reload(&self) {
-        if self.catalog.is_running() {
-            return;
-        }
-
-        self.catalog.spawn_once(load_catalog);
-    }
-}
-```
+A `Task` is for calling the same async operation from several places and reading
+one result. Keep it in the domain service that owns the request.
 
 - Cloning a `Task` is cheap enough to store it in a service.
 - `spawn_once` does nothing while a run is already in flight.
@@ -158,12 +165,11 @@ impl Services {
 When the request depends on a parameter, such as a driver, account, or route id, use `TaskCache`. Every key behaves like a separate `Task`, so results for different parameters never overwrite each other. Think of it as a keyed query cache, not as React's `useEffect` dependency list: entries are retained until you remove them.
 
 ```rust
-struct Services {
-    redraw: Redraw,
+struct CatalogService {
     catalogs: TaskCache<Driver, Catalog, Error>,
 }
 
-impl Services {
+impl CatalogService {
     fn catalog(&self, driver: Driver) -> Task<Catalog, Error> {
         self.catalogs.get_or_create(&driver)
     }
@@ -180,24 +186,12 @@ async fn load_catalog(driver: Driver) -> Result<Catalog, Error> {
 
 `spawn_once` takes the key and passes it to the request function. Switching a page to another key reads that key's snapshot instead of replacing the previous result.
 
-Call `remove` or `clear` when a key is no longer needed; both cancel in-flight requests. `snapshot` returns `None` for keys that were never requested, so rendering stays free of hidden cache writes.
-
-For several parameters, use a tuple or a struct as the key:
-
-```rust
-#[derive(Clone, Eq, Hash, PartialEq)]
-struct CatalogKey {
-    driver: Driver,
-    game_version: String,
-}
-
-let catalogs: TaskCache<CatalogKey, Catalog, Error> = TaskCache::new(&redraw);
-```
+Call `remove` or `clear` when a key is no longer needed; both cancel in-flight requests. `snapshot` returns `None` for keys that were never requested, so rendering stays free of hidden cache writes. For several parameters, use a tuple or a struct as the key.
 
 Reading a snapshot stays explicit:
 
 ```rust
-match &*ctx.catalog.snapshot() {
+match &*ctx.catalog().snapshot() {
     Snapshot::Idle => {}
     Snapshot::Loading { previous } => {}
     Snapshot::Ready(catalog) => {}
@@ -209,7 +203,7 @@ match &*ctx.catalog.snapshot() {
 When a page renders stale data and errors together, flatten the snapshot first. `view()` keeps the error visible even when `data` comes from the previous result:
 
 ```rust
-let snapshot = ctx.catalog.snapshot();
+let snapshot = ctx.catalog().snapshot();
 let view = snapshot.view();
 
 if let Some(catalog) = view.data {
@@ -241,76 +235,27 @@ keys.bind_with_hint(
 ```
 
 `App` draws page hints and global hints on one footer line, so pages do not repeat framework or application shortcuts on every screen.
+Use `App::set_hint_renderer` to replace the footer layout or styling; `hint_line` exposes the default spans.
 
-Navigation is returned from the page:
+Global bindings are reserved chords. `App` resolves them before dispatching to the
+page, so a page that returns `PageEvent::Handled` cannot shadow a global shortcut.
+If a page needs a chord, do not register it globally.
 
-```rust
-PageEvent::Navigate(NavAction::Push(Route::Details))
-PageEvent::Navigate(NavAction::Pop)
-PageEvent::Navigate(NavAction::Replace(Route::Dashboard))
-PageEvent::Navigate(NavAction::Reset(Route::Dashboard))
-```
-
-The navigator applies the action right away. It pauses and disposes the old page, then initializes and resumes the new one.
+Navigation is returned from the page: `PageEvent::Navigate` takes `NavAction::Push`,
+`Pop`, `Replace`, or `Reset`. The navigator applies the action right away: it
+pauses and disposes the old page, then initializes and resumes the new one.
 
 ## Compared with the official async action flow
 
-The official material contains two async shapes:
+The [`async-github`](https://github.com/ratatui/ratatui/tree/main/examples/apps/async-github)
+example keeps widget state in `Arc<RwLock<_>>` and repaints at a fixed 60 FPS.
+The [async template](https://github.com/ratatui/ratatui-website/tree/main/code/templates/components_async)
+routes input, ticks, and background results through one
+`mpsc::unbounded_channel::<Action>()` and a central `match`.
 
-- The [`async-github`](https://github.com/ratatui/ratatui/tree/main/examples/apps/async-github) example keeps widget state in `Arc<RwLock<_>>` and repaints on a fixed 60 FPS tick.
-- The [async template](https://github.com/ratatui/ratatui-website/tree/main/code/templates/components_async) routes everything through one unbounded channel: `mpsc::unbounded_channel::<Action>()`. Input, ticks, resizes, and background results all become `Action`s, and the app dispatches them in one central `match`. See [`app.rs`](https://github.com/ratatui/ratatui-website/blob/main/code/templates/components_async/src/app.rs) and [`action.rs`](https://github.com/ratatui/ratatui-website/blob/main/code/templates/components_async/src/action.rs).
-
-The action-channel template is the one that scales to multiple components, so it is the one compared here. Its shape is:
-
-```rust
-let (action_tx, action_rx) = mpsc::unbounded_channel::<Action>();
-
-tokio::spawn(async move {
-    let catalog = load_catalog().await;
-    action_tx.send(Action::CatalogLoaded(catalog))?;
-});
-
-while let Ok(action) = action_rx.try_recv() {
-    match action {
-        Action::Reload => {}
-        Action::CatalogLoaded(catalog) => {}
-        Action::Quit => break,
-        _ => {}
-    }
-}
-```
-
-Every producer needs an `Action` variant, every consumer sees the whole enum, and the app owns the dispatcher.
-
-With `ratail`, shared data is a typed `Task` and pages return their own output:
-
-```rust
-struct Services {
-    catalog: Task<Catalog, String>,
-}
-
-fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
-    match self.keys.action_for(&key) {
-        Some(Action::Reload) => {
-            ctx.catalog.spawn_once(load_catalog);
-            PageEvent::Handled
-        }
-        Some(Action::Details) => PageEvent::Navigate(NavAction::Push(Route::Details)),
-        None => PageEvent::Ignored,
-    }
-}
-```
-
-The task carries `Loading`, `Ready`, `Error`, and `Cancelled` itself, and every page reads the same snapshot:
-
-```rust
-match &*ctx.catalog.snapshot() {
-    Snapshot::Loading { previous } => {}
-    Snapshot::Ready(catalog) => {}
-    Snapshot::Error { error, previous } => {}
-    _ => {}
-}
-```
+`ratail` replaces that bus with typed handles and direct page output: shared
+async data is a `Task` owned by a service in `Context`, pages return `PageEvent`,
+and `Redraw` wakes the loop only when a snapshot changes.
 
 | Concern | Official action-channel flow | ratail |
 | --- | --- | --- |
@@ -325,7 +270,10 @@ match &*ctx.catalog.snapshot() {
 | Hints | Keybinding config or manual strings | Framework merges page and global hints into a footer |
 | Policy | Template defines `Quit`, `Tick`, and other actions | No built-in quit key, action enum, or frame interval |
 
-This choice has a cost. An action channel is a general pub/sub bus and can express arbitrary cross-component events. `ratail` treats shared state as a typed service (`Task`) and page output as an intent (`PageEvent`). You lose the general bus and the central dispatcher, and you have to implement `Context`, `Page`, and `Router` yourself.
+The trade-off is deliberate: an action channel is a general pub/sub bus, while
+`ratail` treats shared state as a typed service and page output as an intent.
+You lose the general bus and central dispatcher, and implement `Context`,
+`Page`, and `Router` yourself.
 
 ## Example
 

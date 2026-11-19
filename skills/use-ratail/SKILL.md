@@ -19,7 +19,7 @@ The API is small, but guessing from a different version is the fastest way to pr
 
 ## Wiring order
 
-1. Define the route type and implement `Context` on the services struct.
+1. Define the route type, group domain services under `Services`, and implement `Context` on that aggregate.
 2. Implement `Router<C>` so each route produces a boxed page.
 3. Implement `Page<C>` for each page.
 4. Build `App::new(context, router, root)` and run it inside a tokio runtime.
@@ -29,21 +29,49 @@ For a new app or a large rewrite, read [references/app-skeleton.md](references/a
 
 ## Context and routes
 
+For a multi-domain app, model `Services` as the composition root rather than a
+bag of every `Task`. Group related state and intents into domain services, keep
+their fields private, and expose them through accessors on `Services`:
+
 ```rust
+struct Services {
+    ui: UiService,
+    catalog: CatalogService,
+}
+
+impl Services {
+    fn ui(&self) -> &UiService {
+        &self.ui
+    }
+
+    fn catalog(&self) -> &CatalogService {
+        &self.catalog
+    }
+}
+
 impl Context for Services {
     type Route = Route;
 
     fn redraw(&self) -> &Redraw {
-        &self.redraw
+        self.ui.redraw()
     }
 }
 ```
 
-`Context` requires `Sized + Send + Sync + 'static`. `Route` requires `Clone + Send + Sync + 'static`. Put cloneable services and shared tasks in the context. `Router::create` receives `&C`, so page construction can read shared state.
+- One `UiService` owns the `Redraw`; inject it into every domain service constructor.
+- Each service owns its own `Task`/`TaskCache` and exposes intent methods (`reload`, `save`, `sign_in`) plus read-only snapshot or task accessors.
+- Pages call service methods such as `ctx.catalog().reload()`; they do not call `spawn_once` or construct tasks directly.
+- A small app with one or two tasks can keep a flat `Services`; split services once state or intents begin to cluster.
+- Put cross-service orchestration on `Services`, for example reloading dependents after a config change.
+- `Context` requires `Sized + Send + Sync + 'static`. `Route` requires `Clone + Send + Sync + 'static`. Keep services shareable and avoid exposing `&mut` state.
+- `Router::create` receives `&C`, so page construction can read services.
 
 ## Shared async state
 
-Create tasks that should repaint with `Task::with_redraw(&ctx.redraw)`. `Task::new()` works, but it does not wake the event loop when a run finishes.
+Inside a domain service constructor, create tasks with `Task::with_redraw(redraw)`
+from the injected `Redraw`. For a page-local task, use
+`Task::with_redraw(ctx.redraw())`. `Task::new()` works, but it does not wake the
+event loop when a run finishes.
 
 - `spawn_once` starts a future only when no run is in flight and returns whether it started. It takes `FnOnce() -> Future<Output = Result<T, E>>`.
 - `Snapshot` is `Idle`, `Loading { previous }`, `Ready(Arc<T>)`, `Error { error, previous }`, or `Cancelled { previous }`.
@@ -53,17 +81,16 @@ Create tasks that should repaint with `Task::with_redraw(&ctx.redraw)`. `Task::n
 - `cancel()` records `Cancelled`; `reset()` returns `false` while a run is active.
 - A task keeps one latest result. Progress streams, retry queues, and multiple consumers belong in a service, not in `Task`.
 
-Store a task in the context when several pages need the same result. A page-local task is also valid if it has a `Redraw`.
+Store a task in a domain service when several pages need the same result. A page-local task is also valid if it has a `Redraw`.
 
 When the request depends on a parameter (driver, account, route id), use `TaskCache<K, T, E>` instead of one shared `Task`. It is a keyed query cache, not a `useEffect` dependency list: entries persist until `remove` or `clear`. Each key keeps its own snapshot, so switching parameters never overwrites another result. `spawn_once` takes the key and passes it to the request function:
 
 ```rust
-struct Services {
-    redraw: Redraw,
+struct CatalogService {
     catalogs: TaskCache<Driver, Catalog, Error>,
 }
 
-impl Services {
+impl CatalogService {
     fn catalog(&self, driver: Driver) -> Task<Catalog, Error> {
         self.catalogs.get_or_create(&driver)
     }
@@ -77,7 +104,7 @@ impl Services {
 For multiple parameters, use a tuple or a struct deriving `Clone + Eq + Hash` as the key. Use `snapshot` to read without creating an entry, and `remove`/`clear` to cancel and evict when the key space can grow.
 
 ```rust
-match &*ctx.catalog.snapshot() {
+match &*ctx.catalog().snapshot() {
     Snapshot::Idle => {}
     Snapshot::Loading { previous } => {}
     Snapshot::Ready(catalog) => {}
@@ -96,7 +123,7 @@ Every `Page` method receives the route that owns the page:
 fn on_key(&mut self, ctx: &Services, route: &Route, key: KeyEvent) -> PageEvent<Route> {
     match self.keys.action_for(&key) {
         Some(HomeAction::Reload) => {
-            ctx.reload();
+            ctx.catalog().reload();
             PageEvent::Handled
         }
         Some(HomeAction::Details) if *route == Route::Home => {
@@ -118,9 +145,10 @@ fn keybindings(&self, route: &Route) -> Vec<KeyHint> {
 }
 ```
 
-- `PageEvent::Ignored` lets the app try global bindings.
-- `PageEvent::Handled` stops global handling.
-- `PageEvent::Navigate` applies navigation and stops global handling.
+- Global bindings are reserved chords: the app resolves them before `page.on_key`, so a page cannot shadow them.
+- `PageEvent::Ignored` leaves the key unhandled by the page.
+- `PageEvent::Handled` stops further page-level routing; global chords were already resolved.
+- `PageEvent::Navigate` applies navigation.
 - `KeyMap::bind` panics on a duplicate chord. Release events are ignored; press and repeat both resolve.
 - Render hints with `keybindings(route)`. `App` merges page hints and global hints into one footer line. With no hints, the page gets the full frame area.
 - Replace the footer with `App::set_hint_renderer` when the app needs custom layout or styling; `hint_line` exposes the default spans.
@@ -162,3 +190,4 @@ Each lifecycle method receives the page's route. `init` runs on every page creat
 - Putting large non-`Copy` payloads in a `KeyMap` action enum.
 - Repeating global shortcuts in every page's hints; `App` already merges them.
 - Adding a global `Action` channel instead of using `Task` and `PageEvent`.
+- Letting `Services` grow into a bag of unrelated tasks; move each one into the domain service that owns the request.

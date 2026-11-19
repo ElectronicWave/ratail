@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 ## ratail 做了什么
 
 - 每个页面自己管状态，不需要一个中央 app 结构体把所有屏幕的字段攒在一起。
-- 共享的异步数据就是一个放进 `Context` 的 `Task`，每个页面读同一份快照。
+- 共享的异步数据放在 `Context` 的领域服务里，每个页面读同一份快照。
 - 快照变化时，任务通过 `Redraw` 唤醒事件循环，业务状态不用定时轮询。
 - 页面直接返回 `PageEvent::Navigate`，导航不经过信道。
 - `KeyMap` 在页面里把按键绑到 action 和提示；全局按键用闭包注册。
@@ -29,13 +29,13 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 | 类型 | 职责 |
 | --- | --- |
-| `Context` | 所有页面共享的带类型服务，以及路由类型和重绘信号 |
+| `Context` | 带类型领域服务的组合根，以及路由类型和重绘信号 |
 | `Task<T, E>` | 可克隆、可观察的异步任务，快照包含 `Idle`、`Loading`、`Ready`、`Error` 和 `Cancelled` |
 | `TaskCache<K, T, E>` | 带键的任务缓存，共用同一个 `Redraw`，每个键维护独立快照 |
 | `Page` | 路由内的状态、按键处理和渲染 |
 | `PageEvent` | 页面对一次按键的回答：忽略、已处理，或导航意图 |
 | `Navigator` | 路由栈和页面生命周期（`init`、`resume`、`pause`、`dispose`） |
-| `App` | 事件循环、页面优先的按键路由、全局绑定和自动提示栏 |
+| `App` | 事件循环、全局优先的按键路由、页面分发和自动提示栏 |
 | `Redraw` | 任务和应用循环共享的重绘信号 |
 
 ## 快速开始
@@ -46,25 +46,62 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 ```rust
 struct Services {
-    redraw: Redraw,
-    catalog: Task<Catalog, String>,
+    ui: UiService,
+    catalog: CatalogService,
+}
+
+impl Services {
+    fn catalog(&self) -> &CatalogService {
+        &self.catalog
+    }
 }
 
 impl Context for Services {
     type Route = Route;
 
     fn redraw(&self) -> &Redraw {
-        &self.redraw
+        self.ui.redraw()
     }
 }
 ```
 
-用同一个重绘信号创建共享任务：
+多领域应用可以把 `Services` 当作组合根。字段保持私有，通过访问器暴露领域服务，
+并让每个服务持有自己的任务：
 
 ```rust
-let redraw = Redraw::new();
-let catalog = Task::with_redraw(&redraw);
+struct UiService {
+    redraw: Redraw,
+}
+
+impl UiService {
+    fn redraw(&self) -> &Redraw {
+        &self.redraw
+    }
+}
+
+struct CatalogService {
+    catalog: Task<Catalog, String>,
+}
+
+impl CatalogService {
+    fn new(redraw: &Redraw) -> Self {
+        Self {
+            catalog: Task::with_redraw(redraw),
+        }
+    }
+
+    fn snapshot(&self) -> Arc<Snapshot<Catalog, String>> {
+        self.catalog.snapshot()
+    }
+
+    fn reload(&self) {
+        self.catalog.spawn_once(load_catalog);
+    }
+}
 ```
+
+把所有服务都接到同一个 `Redraw` 上。页面调用 `ctx.catalog().reload()` 这样的服务方法，
+不要直接碰 `spawn_once`，也不要自己创建任务。只有一两个任务的小应用可以保持扁平的 `Services`。
 
 ### 一个页面
 
@@ -73,7 +110,7 @@ impl Page<Services> for Dashboard {
     fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
         match self.keys.action_for(&key) {
             Some(Action::Reload) => {
-                ctx.catalog.spawn_once(load_catalog);
+                ctx.catalog().reload();
                 PageEvent::Handled
             }
             Some(Action::Details) => PageEvent::Navigate(NavAction::Push(Route::Details)),
@@ -86,7 +123,7 @@ impl Page<Services> for Dashboard {
     }
 
     fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
-        draw_catalog(&ctx.catalog.snapshot(), frame, area);
+        draw_catalog(&ctx.catalog().snapshot(), frame, area);
     }
 }
 ```
@@ -110,40 +147,9 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-### 自定义 hint 渲染
-
-默认 footer 是一行按键与说明。需要不同布局或主题时可以替换渲染器：
-
-```rust
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{Paragraph, Widget};
-
-app.set_hint_renderer(|_ctx, hints, area, buf| {
-    Paragraph::new(ratail::hint_line(hints))
-        .style(Style::default().fg(Color::Gray))
-        .render(area, buf);
-});
-```
-
-`hint_line` 会生成默认的 spans，自定义渲染器可以基于它重新着色，也可以完全绘制别的 widget。
-
-退出键属于应用自己的策略，所以放在应用里。别的应用可以用 `Esc`、`q`，也可以不绑定退出键。
-
 ## 共享异步状态
 
-`Task` 解决的是：多个地方调用同一个异步操作，读同一份结果。
-
-```rust
-impl Services {
-    fn reload(&self) {
-        if self.catalog.is_running() {
-            return;
-        }
-
-        self.catalog.spawn_once(load_catalog);
-    }
-}
-```
+`Task` 解决的是：多个地方调用同一个异步操作，读同一份结果。把它放在拥有该请求的领域服务里。
 
 - `Task` 克隆很便宜，可以放进服务里。
 - 已经有任务在跑时，`spawn_once` 不会再启动一次。
@@ -156,12 +162,11 @@ impl Services {
 请求依赖某个参数时，比如 driver、账号或路由 ID，使用 `TaskCache`。每个键都相当于一个独立的 `Task`，不同参数的结果不会互相覆盖。它更像按 key 查询的缓存，而不是 React 的 `useEffect` 依赖列表：条目会一直保留，直到你主动移除。
 
 ```rust
-struct Services {
-    redraw: Redraw,
+struct CatalogService {
     catalogs: TaskCache<Driver, Catalog, Error>,
 }
 
-impl Services {
+impl CatalogService {
     fn catalog(&self, driver: Driver) -> Task<Catalog, Error> {
         self.catalogs.get_or_create(&driver)
     }
@@ -178,24 +183,12 @@ async fn load_catalog(driver: Driver) -> Result<Catalog, Error> {
 
 `spawn_once` 接收 key，并把它传给请求函数。页面切换到另一个 key 时读取的是那个 key 的快照，不会覆盖之前的结果。
 
-某个 key 不再需要时调用 `remove` 或 `clear`，两者都会取消进行中的请求。`snapshot` 对从未请求过的 key 返回 `None`，渲染路径不会偷偷写入缓存。
-
-多个参数时，直接用元组或结构体作为 key：
-
-```rust
-#[derive(Clone, Eq, Hash, PartialEq)]
-struct CatalogKey {
-    driver: Driver,
-    game_version: String,
-}
-
-let catalogs: TaskCache<CatalogKey, Catalog, Error> = TaskCache::new(&redraw);
-```
+某个 key 不再需要时调用 `remove` 或 `clear`，两者都会取消进行中的请求。`snapshot` 对从未请求过的 key 返回 `None`，渲染路径不会偷偷写入缓存。多个参数时，直接用元组或结构体作为 key。
 
 读取快照仍然是显式的：
 
 ```rust
-match &*ctx.catalog.snapshot() {
+match &*ctx.catalog().snapshot() {
     Snapshot::Idle => {}
     Snapshot::Loading { previous } => {}
     Snapshot::Ready(catalog) => {}
@@ -207,7 +200,7 @@ match &*ctx.catalog.snapshot() {
 需要同时渲染旧数据和错误时，先把快照摊平。`view()` 即使 `data` 来自上一次结果，也会保留 `error`：
 
 ```rust
-let snapshot = ctx.catalog.snapshot();
+let snapshot = ctx.catalog().snapshot();
 let view = snapshot.view();
 
 if let Some(catalog) = view.data {
@@ -239,76 +232,25 @@ keys.bind_with_hint(
 ```
 
 `App` 把页面提示和全局提示画在同一行页脚里，页面不用在每个屏幕里重复框架或应用的快捷键。
+需要不同布局或主题时，用 `App::set_hint_renderer` 替换页脚；`hint_line` 会生成默认的 spans。
 
-导航由页面返回：
+全局绑定是保留按键。`App` 在把按键分发给页面前先解析全局绑定，因此页面返回
+`PageEvent::Handled` 也不会遮蔽全局快捷键。页面需要使用某个按键时，不要把它注册为全局绑定。
 
-```rust
-PageEvent::Navigate(NavAction::Push(Route::Details))
-PageEvent::Navigate(NavAction::Pop)
-PageEvent::Navigate(NavAction::Replace(Route::Dashboard))
-PageEvent::Navigate(NavAction::Reset(Route::Dashboard))
-```
-
-Navigator 会立刻应用这个动作：对旧页面执行 `pause`/`dispose`，再对新页面执行 `init`/`resume`。
+导航由页面返回：`PageEvent::Navigate` 接受 `NavAction::Push`、`Pop`、`Replace`
+或 `Reset`。Navigator 会立刻应用这个动作：对旧页面执行 `pause`/`dispose`，再对
+新页面执行 `init`/`resume`。
 
 ## 与官方 async action flow 对比
 
-官方材料里有两种异步写法：
+[`async-github`](https://github.com/ratatui/ratatui/tree/main/examples/apps/async-github)
+示例把 widget 状态放在 `Arc<RwLock<_>>` 里，以固定 60 FPS 重绘。
+[官方 async 模板](https://github.com/ratatui/ratatui-website/tree/main/code/templates/components_async)
+则让输入、tick 和后台结果都经过同一个
+`mpsc::unbounded_channel::<Action>()`，由应用在一个中央 `match` 里分发。
 
-- [`async-github`](https://github.com/ratatui/ratatui/tree/main/examples/apps/async-github) 示例把 widget 状态放在 `Arc<RwLock<_>>` 里，以固定 60 FPS 重绘。
-- [官方 async 模板](https://github.com/ratatui/ratatui-website/tree/main/code/templates/components_async) 让所有东西都经过同一个无界信道：`mpsc::unbounded_channel::<Action>()`。输入、tick、resize 和后台结果都变成 `Action`，由应用在一个中央 `match` 里分发。见 [`app.rs`](https://github.com/ratatui/ratatui-website/blob/main/code/templates/components_async/src/app.rs) 和 [`action.rs`](https://github.com/ratatui/ratatui-website/blob/main/code/templates/components_async/src/action.rs)。
-
-能扩展到多个组件的是 action-channel 模板，所以这里拿它来比。它的形态是：
-
-```rust
-let (action_tx, action_rx) = mpsc::unbounded_channel::<Action>();
-
-tokio::spawn(async move {
-    let catalog = load_catalog().await;
-    action_tx.send(Action::CatalogLoaded(catalog))?;
-});
-
-while let Ok(action) = action_rx.try_recv() {
-    match action {
-        Action::Reload => {}
-        Action::CatalogLoaded(catalog) => {}
-        Action::Quit => break,
-        _ => {}
-    }
-}
-```
-
-每个生产者都要加一个 `Action` 变体，每个消费者都能看到整个枚举，分发归应用管。
-
-`ratail` 里，共享数据是带类型的 `Task`，页面输出直接返回：
-
-```rust
-struct Services {
-    catalog: Task<Catalog, String>,
-}
-
-fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
-    match self.keys.action_for(&key) {
-        Some(Action::Reload) => {
-            ctx.catalog.spawn_once(load_catalog);
-            PageEvent::Handled
-        }
-        Some(Action::Details) => PageEvent::Navigate(NavAction::Push(Route::Details)),
-        None => PageEvent::Ignored,
-    }
-}
-```
-
-任务自己带着 `Loading`、`Ready`、`Error` 和 `Cancelled`，所有页面读同一份快照：
-
-```rust
-match &*ctx.catalog.snapshot() {
-    Snapshot::Loading { previous } => {}
-    Snapshot::Ready(catalog) => {}
-    Snapshot::Error { error, previous } => {}
-    _ => {}
-}
-```
+`ratail` 用带类型的句柄和页面直接输出来替代这条总线：共享异步数据是 `Context`
+领域服务里的 `Task`，页面返回 `PageEvent`，`Redraw` 只在快照变化时唤醒循环。
 
 | 关注点 | 官方 action-channel 流程 | ratail |
 | --- | --- | --- |
@@ -323,7 +265,9 @@ match &*ctx.catalog.snapshot() {
 | 提示 | 键位配置或手写字符串 | 框架把页面和全局提示合并到页脚 |
 | 策略 | 模板定义 `Quit`、`Tick` 等 action | 不内置退出键、action 枚举或帧间隔 |
 
-这个选择有代价。Action 信道是通用的 pub/sub 总线，能表达任意跨组件事件；`ratail` 把共享状态当成带类型的服务（`Task`），把页面输出当成意图（`PageEvent`）。你省掉了通用总线和中央分发器，代价是要自己实现 `Context`、`Page` 和 `Router`。
+这是一个有意的取舍：Action 信道是通用的 pub/sub 总线，而 `ratail` 把共享状态
+当成带类型的服务、把页面输出当成意图。你省掉了通用总线和中央分发器，代价是
+自己实现 `Context`、`Page` 和 `Router`。
 
 ## 示例
 

@@ -4,6 +4,7 @@
 //! runs once, and every page renders the same snapshot. Every fourth request
 //! fails on purpose so the error path and previous-value retention are visible.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -34,17 +35,55 @@ enum Action {
 }
 
 struct Services {
-    redraw: Redraw,
-    catalog: Task<Catalog, String>,
-    requests: AtomicUsize,
+    ui: UiService,
+    catalog: CatalogService,
 }
 
 impl Services {
     fn new() -> Self {
-        let redraw = Redraw::new();
+        let ui = UiService::new();
+        let catalog = CatalogService::new(ui.redraw());
+        Self { ui, catalog }
+    }
+
+    fn catalog(&self) -> &CatalogService {
+        &self.catalog
+    }
+}
+
+impl Context for Services {
+    type Route = Route;
+
+    fn redraw(&self) -> &Redraw {
+        self.ui.redraw()
+    }
+}
+
+struct UiService {
+    redraw: Redraw,
+}
+
+impl UiService {
+    fn new() -> Self {
         Self {
-            catalog: Task::with_redraw(&redraw),
-            redraw,
+            redraw: Redraw::new(),
+        }
+    }
+
+    fn redraw(&self) -> &Redraw {
+        &self.redraw
+    }
+}
+
+struct CatalogService {
+    catalog: Task<Catalog, String>,
+    requests: AtomicUsize,
+}
+
+impl CatalogService {
+    fn new(redraw: &Redraw) -> Self {
+        Self {
+            catalog: Task::with_redraw(redraw),
             requests: AtomicUsize::new(0),
         }
     }
@@ -57,13 +96,13 @@ impl Services {
         let request = self.requests.fetch_add(1, Ordering::Relaxed) + 1;
         self.catalog.spawn_once(move || load_catalog(request));
     }
-}
 
-impl Context for Services {
-    type Route = Route;
+    fn snapshot(&self) -> Arc<Snapshot<Catalog, String>> {
+        self.catalog.snapshot()
+    }
 
-    fn redraw(&self) -> &Redraw {
-        &self.redraw
+    fn requests(&self) -> usize {
+        self.requests.load(Ordering::Relaxed)
     }
 }
 
@@ -126,7 +165,7 @@ fn bind(keys: &mut KeyMap<Action>, chord: KeyChord, action: Action, hint: KeyHin
 impl Page<Services> for CatalogPage {
     fn init(&mut self, ctx: &Services, route: &Route) {
         if *route == Route::Dashboard {
-            ctx.reload();
+            ctx.catalog().reload();
         }
     }
 
@@ -140,7 +179,7 @@ impl Page<Services> for CatalogPage {
     fn on_key(&mut self, ctx: &Services, route: &Route, key: KeyEvent) -> PageEvent<Route> {
         match self.keys.action_for(&key) {
             Some(Action::Reload) => {
-                ctx.reload();
+                ctx.catalog().reload();
                 PageEvent::Handled
             }
             Some(Action::Details) if *route == Route::Dashboard => {
@@ -154,13 +193,10 @@ impl Page<Services> for CatalogPage {
     fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(vec![
             Span::styled("Catalog", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "   shared requests: {}",
-                ctx.requests.load(Ordering::Relaxed)
-            )),
+            Span::raw(format!("   shared requests: {}", ctx.catalog().requests())),
         ])];
         lines.push(Line::default());
-        lines.extend(catalog_lines(&ctx.catalog.snapshot()));
+        lines.extend(catalog_lines(ctx.catalog().snapshot().as_ref()));
         frame.render_widget(Paragraph::new(lines).block(Block::bordered()), area);
     }
 }

@@ -65,7 +65,11 @@ impl<C: Context, R: Router<C>> App<C, R> {
         &mut self.navigator
     }
 
-    /// Binds a key handled after the current page ignores it.
+    /// Binds an application-wide key.
+    ///
+    /// Global chords are reserved for the application and are resolved before
+    /// the current page sees the key. A page cannot shadow a global binding;
+    /// if a page needs a chord, do not register it globally.
     pub fn bind_global<F>(&mut self, chord: KeyChord, hint: KeyHint, action: F)
     where
         F: FnMut(&mut C) -> AppFlow + 'static,
@@ -121,7 +125,15 @@ impl<C: Context, R: Router<C>> App<C, R> {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> AppFlow {
-        let chord = KeyChord::from_event(&key);
+        if let Some(chord) = KeyChord::from_event(&key)
+            && let Some(index) = self
+                .globals
+                .iter()
+                .position(|binding| binding.chord == chord)
+        {
+            return (self.globals[index].action)(&mut self.context);
+        }
+
         let event = match self.navigator.current_mut() {
             Some((route, page)) => page.on_key(&self.context, route, key),
             None => PageEvent::Ignored,
@@ -136,18 +148,7 @@ impl<C: Context, R: Router<C>> App<C, R> {
             }
         }
 
-        let Some(chord) = chord else {
-            return AppFlow::Continue;
-        };
-        let Some(index) = self
-            .globals
-            .iter()
-            .position(|binding| binding.chord == chord)
-        else {
-            return AppFlow::Continue;
-        };
-
-        (self.globals[index].action)(&mut self.context)
+        AppFlow::Continue
     }
 
     fn render(&mut self, frame: &mut Frame) {

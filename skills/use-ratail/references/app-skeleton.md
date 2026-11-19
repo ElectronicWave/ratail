@@ -1,8 +1,9 @@
 # Ratail app skeleton
 
-Adapt this skeleton to the project instead of copying it verbatim. Keep the project's existing module layout, naming, and error types.
+Adapt this skeleton to the project instead of copying it verbatim. Keep the project's existing module layout, naming, and error types. A small single-task app can keep a flat `Services`; this skeleton shows the split used as the app grows.
 
 ```rust
+use std::sync::Arc;
 use std::time::Duration;
 
 use ratail::{
@@ -23,21 +24,19 @@ enum Route {
 }
 
 struct Services {
-    redraw: Redraw,
-    items: Task<Vec<Item>, String>,
+    ui: UiService,
+    items: ItemService,
 }
 
 impl Services {
     fn new() -> Self {
-        let redraw = Redraw::new();
-        Self {
-            items: Task::with_redraw(&redraw),
-            redraw,
-        }
+        let ui = UiService::new();
+        let items = ItemService::new(ui.redraw());
+        Self { ui, items }
     }
 
-    fn reload(&self) {
-        self.items.spawn_once(load_items);
+    fn items(&self) -> &ItemService {
+        &self.items
     }
 }
 
@@ -45,7 +44,43 @@ impl Context for Services {
     type Route = Route;
 
     fn redraw(&self) -> &Redraw {
+        self.ui.redraw()
+    }
+}
+
+struct UiService {
+    redraw: Redraw,
+}
+
+impl UiService {
+    fn new() -> Self {
+        Self {
+            redraw: Redraw::new(),
+        }
+    }
+
+    fn redraw(&self) -> &Redraw {
         &self.redraw
+    }
+}
+
+struct ItemService {
+    items: Task<Vec<Item>, String>,
+}
+
+impl ItemService {
+    fn new(redraw: &Redraw) -> Self {
+        Self {
+            items: Task::with_redraw(redraw),
+        }
+    }
+
+    fn snapshot(&self) -> Arc<Snapshot<Vec<Item>, String>> {
+        self.items.snapshot()
+    }
+
+    fn reload(&self) {
+        self.items.spawn_once(load_items);
     }
 }
 
@@ -95,7 +130,7 @@ impl HomePage {
 
 impl Page<Services> for HomePage {
     fn init(&mut self, ctx: &Services, _route: &Route) {
-        ctx.reload();
+        ctx.items().reload();
     }
 
     fn keybindings(&self, _route: &Route) -> Vec<KeyHint> {
@@ -105,7 +140,7 @@ impl Page<Services> for HomePage {
     fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
         match self.keys.action_for(&key) {
             Some(HomeAction::Reload) => {
-                ctx.reload();
+                ctx.items().reload();
                 PageEvent::Handled
             }
             Some(HomeAction::Details) => PageEvent::Navigate(NavAction::Push(Route::Details)),
@@ -114,7 +149,7 @@ impl Page<Services> for HomePage {
     }
 
     fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
-        let text = match &*ctx.items.snapshot() {
+        let text = match &*ctx.items().snapshot() {
             Snapshot::Idle => "idle".to_string(),
             Snapshot::Loading { .. } => "loading".to_string(),
             Snapshot::Ready(items) => format!("{} items", items.len()),
@@ -162,9 +197,10 @@ async fn main() -> std::io::Result<()> {
 
 ## Variations
 
-- Shared task across routes: keep the `Task` in `Services` and read the same snapshot from each page.
-- Parameterized request: store a `TaskCache<K, T, E>` in `Services` when each key needs its own snapshot, such as a catalog per driver. Treat it as a cache and evict keys that can grow without bound.
-- Page-local task: store the `Task` in the page and create it with `Task::with_redraw(&ctx.redraw)`.
+- Shared task across routes: keep the `Task` in its domain service and read the same snapshot from each page.
+- Parameterized request: store a `TaskCache<K, T, E>` in the domain service when each key needs its own snapshot, such as a catalog per driver. Treat it as a cache and evict keys that can grow without bound.
+- New domain area: add a service struct with private fields, construct it in `Services::new`, inject the shared `Redraw`, and expose the service through an accessor.
+- Page-local task: store the `Task` in the page and create it with `Task::with_redraw(ctx.redraw())`.
 - No action enum: match `KeyEvent` directly in `on_key` and still return `PageEvent`.
 - Global key that mutates services: use `App::bind_global` with a closure over `&mut C`; return `AppFlow::Exit` only when the app should stop.
 - Custom footer: call `App::set_hint_renderer` and draw any widget in the footer area; `hint_line` builds the default spans.
