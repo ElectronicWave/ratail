@@ -153,6 +153,22 @@ fn keybindings(&self, route: &Route) -> Vec<KeyHint> {
 - Render hints with `keybindings(route)`. `App` merges page hints and global hints into one footer line. With no hints, the page gets the full frame area.
 - Replace the footer with `App::set_hint_renderer` when the app needs custom layout or styling; `hint_line` exposes the default spans.
 
+`Page` and `Router` are generic over the route type and default to
+`C::Route`. A page that belongs to a section can use a section-local route:
+
+```rust
+impl Page<Services, AccountRoute> for SkinsPage {
+    fn on_key(
+        &mut self,
+        ctx: &Services,
+        route: &AccountRoute,
+        key: KeyEvent,
+    ) -> PageEvent<AccountRoute> {
+        // ...
+    }
+}
+```
+
 Global keys return `AppFlow`:
 
 ```rust
@@ -175,6 +191,77 @@ Keep actions local to the page that handles them. Building one app-wide action e
 
 Each lifecycle method receives the page's route. `init` runs on every page creation, not once per route type. Put repeatable setup there. Use `resume` for work that should run whenever a page becomes visible again.
 
+## Nested navigation
+
+Keep a section's routes in their own `Navigator<C, SectionRoute, SectionRouter>`
+instead of adding a `Screen`/`Mode` enum to a large page:
+
+```rust
+struct AccountsShell {
+    nav: Navigator<Services, AccountRoute, AccountRouter>,
+}
+
+impl AccountsShell {
+    fn new(ctx: &Services) -> Self {
+        Self {
+            nav: Navigator::new(AccountRouter, AccountRoute::List, ctx),
+        }
+    }
+}
+```
+
+Delegate keys, rendering, hints, and lifecycle to the nested navigator with its
+built-in forwarding helpers:
+
+```rust
+if self.nav.handle_key(ctx, key) {
+    return PageEvent::Handled;
+}
+```
+
+Use `self.nav.render(ctx, frame, area)`, `self.nav.keybindings()`,
+`self.nav.resume_current(ctx)`, `self.nav.pause_current(ctx)`, and
+`self.nav.dispose_all(ctx)` in the outer shell's `Page` implementation. Return
+`Ignored` from the sub-page when it is at its root and wants the outer shell to
+handle the key, such as `Esc` moving focus back to a sidebar.
+
+## Callback-driven modals
+
+Implement `WithModal<C, R>` and wrap the page in `ModalPage::new(page)` in your
+`Router`. `ModalPage` owns the `ModalHost<C, Self, R>` and forwards `on_key`,
+`render`, `keybindings`, and `dispose` automatically, so the page does not need
+`Option<...>` fields, a separate `State` struct, or a `DeleteTarget` enum:
+
+```rust
+struct SkinsPage {
+    account_id: u64,
+}
+
+impl SkinsPage {
+    fn open_import(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
+        modals.open(FilePicker::png(), |page, _ctx, modals, path| {
+            modals.open(TextPrompt::new("name", default_name(&path)), move |page, ctx, _, name| {
+                ctx.skins().import(page.account_id, name, path);
+            });
+        });
+    }
+
+    fn confirm_delete(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
+        modals.open(Confirm::new("Delete?"), |page, ctx, _, ()| {
+            ctx.accounts().remove(page.account_id);
+            NavAction::Pop
+        });
+    }
+}
+```
+
+`Modal::on_key` returns `ModalOutcome::Completed(value)` to run the callback,
+`Cancelled` to close without running it, `Handled` to consume the key, or
+`Ignored` to let the page handle it. Completion callbacks can return `()`,
+`NavAction<R>`, or `PageEvent<R>`. If a page embeds `ModalHost` manually instead
+of using `ModalPage`, call `modals.dispatch_key(&mut state, ctx, key)` at the
+top of `on_key`.
+
 ## Runtime behavior
 
 - `App::run` draws first, then waits for a terminal event or `Redraw::requested()`.
@@ -191,3 +278,6 @@ Each lifecycle method receives the page's route. `init` runs on every page creat
 - Repeating global shortcuts in every page's hints; `App` already merges them.
 - Adding a global `Action` channel instead of using `Task` and `PageEvent`.
 - Letting `Services` grow into a bag of unrelated tasks; move each one into the domain service that owns the request.
+- Hand-maintaining a `Screen`/`Mode` enum when a nested `Navigator` can own the section's route stack.
+- Storing popups as `Option` fields and matching `PopupEvent` in `on_key`; open them through `ModalHost` and put the follow-up in the completion callback.
+- Wrapping a modal-heavy page manually instead of using `ModalPage<C, P, R>` (`WithModal`), or forgetting that a modal completion callback can return `NavAction<R>` directly.

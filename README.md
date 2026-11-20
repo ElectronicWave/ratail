@@ -35,6 +35,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | `Page` | Route-local state, key handling, and rendering |
 | `PageEvent` | The page's answer to a key: ignored, handled, or a navigation intent |
 | `Navigator` | Route stack and page lifecycle (`init`, `resume`, `pause`, `dispose`) |
+| `ModalHost` / `ModalPage` | Callback-driven modal stack and zero-boilerplate page wrapper |
 | `App` | Event loop, global-first key routing, page dispatch, and automatic hint footer |
 | `Redraw` | Repaint signal shared by tasks and the application loop |
 
@@ -244,6 +245,92 @@ If a page needs a chord, do not register it globally.
 Navigation is returned from the page: `PageEvent::Navigate` takes `NavAction::Push`,
 `Pop`, `Replace`, or `Reset`. The navigator applies the action right away: it
 pauses and disposes the old page, then initializes and resumes the new one.
+
+### Nested navigation
+
+`Page`, `Router`, and `Navigator` are parameterized by route type. A shell page
+can therefore own a section-local navigator instead of re-implementing a
+`Screen`/`Mode` enum inside `on_key`:
+
+```rust
+enum AccountRoute {
+    List,
+    Skins(u64),
+}
+
+struct AccountRouter;
+
+impl Router<Services, AccountRoute> for AccountRouter {
+    fn create(
+        &mut self,
+        route: &AccountRoute,
+        ctx: &Services,
+    ) -> Box<dyn Page<Services, AccountRoute>> {
+        match route {
+            AccountRoute::List => Box::new(AccountListPage::new()),
+            AccountRoute::Skins(id) => Box::new(ModalPage::new(SkinsPage::new(*id, ctx))),
+        }
+    }
+}
+
+struct AccountsShell {
+    nav: Navigator<Services, AccountRoute, AccountRouter>,
+}
+```
+
+Delegate keys, hints, rendering, and lifecycle with one-line helpers on
+`Navigator`:
+
+```rust
+if self.nav.handle_key(ctx, key) {
+    return PageEvent::Handled;
+}
+```
+
+`nav.render(ctx, frame, area)`, `nav.keybindings()`, `nav.resume_current(ctx)`,
+`nav.pause_current(ctx)`, and `nav.dispose_all(ctx)` forward the remaining
+`Page` hooks. When the nested stack is at its root and returns `Ignored` for
+`Esc`, `handle_key` returns `false` so the outer shell can take over (for
+example, to move focus back to a sidebar).
+
+### Callback-driven modals
+
+`ModalHost<C, S, R>` owns the active modal stack and stores each completion
+callback when the modal is opened. Wrap a page in `ModalPage::new(...)` and
+implement `WithModal<C, R>` so the page struct does not even need a `modals`
+field or separate `State` struct—completion callbacks receive `&mut Self`
+directly and can return `()`, `NavAction<R>`, or `PageEvent<R>`:
+
+```rust
+struct SkinsPage {
+    account_id: u64,
+    keys: KeyMap<Action>,
+}
+
+impl SkinsPage {
+    fn open_import(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
+        modals.open(FilePicker::png(), |page, _ctx, modals, path| {
+            modals.open(TextPrompt::new("name", default_name(&path)), move |page, ctx, _, name| {
+                ctx.skins().import(page.account_id, name, path);
+            });
+        });
+    }
+
+    fn confirm_delete_account(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
+        modals.open(Confirm::new("Delete account?"), |page, ctx, _, ()| {
+            ctx.accounts().remove(page.account_id);
+            NavAction::Pop
+        });
+    }
+}
+```
+
+`Modal::on_key` returns `ModalOutcome::Completed(value)` to run the callback,
+`Cancelled` to close without it, `Handled` to consume a key, or `Ignored` to let
+the page handle that key. `ModalPage` automatically routes keys to the top
+modal first, renders active modals above the page, and replaces page key hints
+with the top modal's hints while any modal is open. Pages that prefer manual
+control can embed `ModalHost` directly and call `modals.dispatch_key(&mut state, ctx, key)`.
 
 ## Compared with the official async action flow
 
