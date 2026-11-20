@@ -1,5 +1,10 @@
+use ratatui::Frame;
+use ratatui::crossterm::event::KeyEvent;
+use ratatui::layout::Rect;
+
 use crate::context::Context;
-use crate::page::Page;
+use crate::input::KeyHint;
+use crate::page::{Page, PageEvent};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NavAction<R> {
@@ -10,22 +15,31 @@ pub enum NavAction<R> {
 }
 
 /// Creates page state for a route.
-pub trait Router<C: Context> {
-    fn create(&mut self, route: &C::Route, ctx: &C) -> Box<dyn Page<C>>;
+///
+/// `R` defaults to [`Context::Route`]. A shell page can host a nested
+/// [`Navigator`] with a section-local router such as
+/// `Router<C, AccountRoute>`.
+pub trait Router<C: Context, R = <C as Context>::Route> {
+    fn create(&mut self, route: &R, ctx: &C) -> Box<dyn Page<C, R>>;
 }
 
-pub struct Navigator<C: Context, R: Router<C>> {
-    router: R,
-    stack: Vec<RouteEntry<C>>,
+/// Owns a route stack and the pages created for it.
+///
+/// `R` is the route type this navigator manages and `Rt` is its router. Use a
+/// nested navigator with a section-local route type to keep each area's
+/// navigation independent from [`Context::Route`].
+pub struct Navigator<C: Context, R, Rt: Router<C, R>> {
+    router: Rt,
+    stack: Vec<RouteEntry<C, R>>,
 }
 
-struct RouteEntry<C: Context> {
-    route: C::Route,
-    page: Box<dyn Page<C>>,
+struct RouteEntry<C: Context, R> {
+    route: R,
+    page: Box<dyn Page<C, R>>,
 }
 
-impl<C: Context, R: Router<C>> Navigator<C, R> {
-    pub fn new(mut router: R, root: C::Route, ctx: &C) -> Self {
+impl<C: Context, R, Rt: Router<C, R>> Navigator<C, R, Rt> {
+    pub fn new(mut router: Rt, root: R, ctx: &C) -> Self {
         let mut page = router.create(&root, ctx);
         page.init(ctx, &root);
         page.resume(ctx, &root);
@@ -36,7 +50,7 @@ impl<C: Context, R: Router<C>> Navigator<C, R> {
         }
     }
 
-    pub fn apply(&mut self, action: NavAction<C::Route>, ctx: &C) {
+    pub fn apply(&mut self, action: NavAction<R>, ctx: &C) {
         match action {
             NavAction::Push(route) => self.push(route, ctx),
             NavAction::Pop => {
@@ -47,7 +61,7 @@ impl<C: Context, R: Router<C>> Navigator<C, R> {
         }
     }
 
-    pub fn push(&mut self, route: C::Route, ctx: &C) {
+    pub fn push(&mut self, route: R, ctx: &C) {
         if let Some(current) = self.stack.last_mut() {
             current.page.pause(ctx, &current.route);
         }
@@ -79,7 +93,7 @@ impl<C: Context, R: Router<C>> Navigator<C, R> {
         true
     }
 
-    pub fn replace(&mut self, route: C::Route, ctx: &C) {
+    pub fn replace(&mut self, route: R, ctx: &C) {
         if let Some(mut current) = self.stack.pop() {
             current.page.pause(ctx, &current.route);
             current.page.dispose(ctx, &current.route);
@@ -92,7 +106,7 @@ impl<C: Context, R: Router<C>> Navigator<C, R> {
         self.stack.push(RouteEntry { route, page });
     }
 
-    pub fn reset(&mut self, route: C::Route, ctx: &C) {
+    pub fn reset(&mut self, route: R, ctx: &C) {
         while let Some(mut entry) = self.stack.pop() {
             entry.page.pause(ctx, &entry.route);
             entry.page.dispose(ctx, &entry.route);
@@ -106,20 +120,20 @@ impl<C: Context, R: Router<C>> Navigator<C, R> {
     }
 
     /// Borrows the current route together with its page.
-    pub fn current(&self) -> Option<(&C::Route, &(dyn Page<C> + 'static))> {
+    pub fn current(&self) -> Option<(&R, &(dyn Page<C, R> + 'static))> {
         self.stack
             .last()
             .map(|entry| (&entry.route, entry.page.as_ref()))
     }
 
     /// Mutably borrows the current route together with its page.
-    pub fn current_mut(&mut self) -> Option<(&C::Route, &mut (dyn Page<C> + 'static))> {
+    pub fn current_mut(&mut self) -> Option<(&R, &mut (dyn Page<C, R> + 'static))> {
         self.stack
             .last_mut()
             .map(|entry| (&entry.route, entry.page.as_mut()))
     }
 
-    pub fn current_route(&self) -> Option<&C::Route> {
+    pub fn current_route(&self) -> Option<&R> {
         self.stack.last().map(|entry| &entry.route)
     }
 
@@ -129,5 +143,71 @@ impl<C: Context, R: Router<C>> Navigator<C, R> {
 
     pub fn is_empty(&self) -> bool {
         self.stack.is_empty()
+    }
+
+    /// Forwards a key to the current page and applies any resulting
+    /// [`NavAction`] to this navigator.
+    ///
+    /// Returns `true` when the current page handled the key or navigated, and
+    /// `false` when it returned [`PageEvent::Ignored`] (allowing an outer shell
+    /// page to handle keys like `Esc` when the sub-navigator is at its root).
+    pub fn handle_key(&mut self, ctx: &C, key: KeyEvent) -> bool {
+        let event = match self.current_mut() {
+            Some((route, page)) => page.on_key(ctx, route, key),
+            None => PageEvent::Ignored,
+        };
+
+        match event {
+            PageEvent::Ignored => false,
+            PageEvent::Handled => true,
+            PageEvent::Navigate(action) => {
+                self.apply(action, ctx);
+                true
+            }
+        }
+    }
+
+    /// Renders the current page into `area`.
+    pub fn render(&mut self, ctx: &C, frame: &mut Frame, area: Rect) {
+        if let Some((route, page)) = self.current_mut() {
+            page.render(ctx, route, frame, area);
+        }
+    }
+
+    /// Returns the current page's key hints.
+    pub fn keybindings(&self) -> Vec<KeyHint> {
+        match self.current() {
+            Some((route, page)) => page.keybindings(route),
+            None => Vec::new(),
+        }
+    }
+
+    /// Resumes the current page. Call this from an outer shell page's
+    /// [`Page::resume`].
+    pub fn resume_current(&mut self, ctx: &C) {
+        if let Some((route, page)) = self.current_mut() {
+            page.resume(ctx, route);
+        }
+    }
+
+    /// Pauses the current page. Call this from an outer shell page's
+    /// [`Page::pause`].
+    pub fn pause_current(&mut self, ctx: &C) {
+        if let Some((route, page)) = self.current_mut() {
+            page.pause(ctx, route);
+        }
+    }
+
+    /// Pauses the active page and disposes every page in the stack. Call this
+    /// from an outer shell page's [`Page::dispose`].
+    pub fn dispose_all(&mut self, ctx: &C) {
+        if let Some(mut top) = self.stack.pop() {
+            top.page.pause(ctx, &top.route);
+            top.page.dispose(ctx, &top.route);
+        }
+
+        while let Some(mut entry) = self.stack.pop() {
+            entry.page.dispose(ctx, &entry.route);
+        }
     }
 }

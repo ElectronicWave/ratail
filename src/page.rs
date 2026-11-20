@@ -15,24 +15,28 @@ pub enum PageEvent<R> {
 }
 
 /// A route's page state and behavior.
-pub trait Page<C: Context> {
-    fn init(&mut self, _ctx: &C, _route: &C::Route) {}
+///
+/// `R` defaults to [`Context::Route`], so a top-level page only needs
+/// `impl Page<C>`. Embedded pages can use a section-local route type, such as
+/// `impl Page<C, AccountRoute>`.
+pub trait Page<C: Context, R = <C as Context>::Route> {
+    fn init(&mut self, _ctx: &C, _route: &R) {}
 
-    fn resume(&mut self, _ctx: &C, _route: &C::Route) {}
+    fn resume(&mut self, _ctx: &C, _route: &R) {}
 
-    fn pause(&mut self, _ctx: &C, _route: &C::Route) {}
+    fn pause(&mut self, _ctx: &C, _route: &R) {}
 
-    fn dispose(&mut self, _ctx: &C, _route: &C::Route) {}
+    fn dispose(&mut self, _ctx: &C, _route: &R) {}
 
-    fn on_key(&mut self, _ctx: &C, _route: &C::Route, _key: KeyEvent) -> PageEvent<C::Route> {
+    fn on_key(&mut self, _ctx: &C, _route: &R, _key: KeyEvent) -> PageEvent<R> {
         PageEvent::Ignored
     }
 
     /// Hints for the current page. This is called on every frame, so pages can
     /// regenerate localized hints when the active locale changes.
-    fn keybindings(&self, _route: &C::Route) -> Vec<KeyHint> {
+    fn keybindings(&self, _route: &R) -> Vec<KeyHint> {
         Vec::new()
     }
 
-    fn render(&mut self, ctx: &C, route: &C::Route, frame: &mut Frame, area: Rect);
+    fn render(&mut self, ctx: &C, route: &R, frame: &mut Frame, area: Rect);
 }

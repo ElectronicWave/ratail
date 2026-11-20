@@ -35,6 +35,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | `Page` | 路由内的状态、按键处理和渲染 |
 | `PageEvent` | 页面对一次按键的回答：忽略、已处理，或导航意图 |
 | `Navigator` | 路由栈和页面生命周期（`init`、`resume`、`pause`、`dispose`） |
+| `ModalHost` / `ModalPage` | 回调驱动的弹窗栈与零样板页面包装器 |
 | `App` | 事件循环、全局优先的按键路由、页面分发和自动提示栏 |
 | `Redraw` | 任务和应用循环共享的重绘信号 |
 
@@ -240,6 +241,87 @@ keys.bind_with_hint(
 导航由页面返回：`PageEvent::Navigate` 接受 `NavAction::Push`、`Pop`、`Replace`
 或 `Reset`。Navigator 会立刻应用这个动作：对旧页面执行 `pause`/`dispose`，再对
 新页面执行 `init`/`resume`。
+
+### 嵌套导航
+
+`Page`、`Router` 和 `Navigator` 都以路由类型为泛型参数。Shell 页面因此可以直接
+持有一个局部导航器，而不必在 `on_key` 里手写 `Screen`/`Mode` 枚举：
+
+```rust
+enum AccountRoute {
+    List,
+    Skins(u64),
+}
+
+struct AccountRouter;
+
+impl Router<Services, AccountRoute> for AccountRouter {
+    fn create(
+        &mut self,
+        route: &AccountRoute,
+        ctx: &Services,
+    ) -> Box<dyn Page<Services, AccountRoute>> {
+        match route {
+            AccountRoute::List => Box::new(AccountListPage::new()),
+            AccountRoute::Skins(id) => Box::new(ModalPage::new(SkinsPage::new(*id, ctx))),
+        }
+    }
+}
+
+struct AccountsShell {
+    nav: Navigator<Services, AccountRoute, AccountRouter>,
+}
+```
+
+使用 `Navigator` 上的一行辅助方法转发按键、提示、渲染与生命周期：
+
+```rust
+if self.nav.handle_key(ctx, key) {
+    return PageEvent::Handled;
+}
+```
+
+`nav.render(ctx, frame, area)`、`nav.keybindings()`、`nav.resume_current(ctx)`、
+`nav.pause_current(ctx)` 和 `nav.dispose_all(ctx)` 负责转发其余 `Page` 钩子。
+当局部路由栈处于根页面并对 `Esc` 返回 `Ignored` 时，`handle_key` 返回 `false`，
+外层 Shell 可以直接接管（例如把焦点切回侧边栏）。
+
+### 回调驱动弹窗
+
+`ModalHost<C, S, R>` 持有当前弹窗栈，并在打开弹窗时保存完成回调。用
+`ModalPage::new(...)` 包装页面并实现 `WithModal<C, R>`，页面结构体甚至不需要
+`modals` 字段或拆出单独的 `State` 结构体——完成回调直接拿到 `&mut Self`，并且可以
+返回 `()`、`NavAction<R>` 或 `PageEvent<R>`：
+
+```rust
+struct SkinsPage {
+    account_id: u64,
+    keys: KeyMap<Action>,
+}
+
+impl SkinsPage {
+    fn open_import(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
+        modals.open(FilePicker::png(), |page, _ctx, modals, path| {
+            modals.open(TextPrompt::new("name", default_name(&path)), move |page, ctx, _, name| {
+                ctx.skins().import(page.account_id, name, path);
+            });
+        });
+    }
+
+    fn confirm_delete_account(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
+        modals.open(Confirm::new("Delete account?"), |page, ctx, _, ()| {
+            ctx.accounts().remove(page.account_id);
+            NavAction::Pop
+        });
+    }
+}
+```
+
+`Modal::on_key` 返回 `ModalOutcome::Completed(value)` 会执行回调，`Cancelled`
+关闭弹窗但不执行，`Handled` 表示消费按键，`Ignored` 留给页面处理。`ModalPage`
+会自动把按键优先路由给顶层弹窗、在页面上方叠加渲染所有激活弹窗，并在弹窗打开时用
+顶层弹窗的提示替换页面提示。需要手动控制时，也可以直接内嵌 `ModalHost` 并调用
+`modals.dispatch_key(&mut state, ctx, key)`。
 
 ## 与官方 async action flow 对比
 

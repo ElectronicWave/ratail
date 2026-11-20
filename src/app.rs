@@ -13,7 +13,6 @@ use ratatui::widgets::Paragraph;
 use crate::context::Context;
 use crate::input::{KeyChord, KeyHint};
 use crate::navigator::{Navigator, Router};
-use crate::page::PageEvent;
 
 /// Controls the application loop after a global key action runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,7 +23,7 @@ pub enum AppFlow {
 
 pub struct App<C: Context, R: Router<C>> {
     context: C,
-    navigator: Navigator<C, R>,
+    navigator: Navigator<C, C::Route, R>,
     globals: Vec<GlobalBinding<C>>,
     hint_renderer: Option<Box<HintRenderer<C>>>,
 }
@@ -57,11 +56,11 @@ impl<C: Context, R: Router<C>> App<C, R> {
         &mut self.context
     }
 
-    pub fn navigator(&self) -> &Navigator<C, R> {
+    pub fn navigator(&self) -> &Navigator<C, C::Route, R> {
         &self.navigator
     }
 
-    pub fn navigator_mut(&mut self) -> &mut Navigator<C, R> {
+    pub fn navigator_mut(&mut self) -> &mut Navigator<C, C::Route, R> {
         &mut self.navigator
     }
 
@@ -134,20 +133,7 @@ impl<C: Context, R: Router<C>> App<C, R> {
             return (self.globals[index].action)(&mut self.context);
         }
 
-        let event = match self.navigator.current_mut() {
-            Some((route, page)) => page.on_key(&self.context, route, key),
-            None => PageEvent::Ignored,
-        };
-
-        match event {
-            PageEvent::Ignored => {}
-            PageEvent::Handled => return AppFlow::Continue,
-            PageEvent::Navigate(action) => {
-                self.navigator.apply(action, &self.context);
-                return AppFlow::Continue;
-            }
-        }
-
+        self.navigator.handle_key(&self.context, key);
         AppFlow::Continue
     }
 
@@ -156,18 +142,14 @@ impl<C: Context, R: Router<C>> App<C, R> {
         let area = frame.area();
 
         if hints.is_empty() {
-            if let Some((route, page)) = self.navigator.current_mut() {
-                page.render(&self.context, route, frame, area);
-            }
+            self.navigator.render(&self.context, frame, area);
             return;
         }
 
         let [body, footer] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
-        if let Some((route, page)) = self.navigator.current_mut() {
-            page.render(&self.context, route, frame, body);
-        }
+        self.navigator.render(&self.context, frame, body);
 
         match &mut self.hint_renderer {
             Some(renderer) => renderer(&self.context, &hints, footer, frame.buffer_mut()),
@@ -176,10 +158,7 @@ impl<C: Context, R: Router<C>> App<C, R> {
     }
 
     fn hints(&self) -> Vec<KeyHint> {
-        let mut hints = Vec::new();
-        if let Some((route, page)) = self.navigator.current() {
-            hints.extend(page.keybindings(route));
-        }
+        let mut hints = self.navigator.keybindings();
         hints.extend(self.globals.iter().map(|binding| binding.hint.clone()));
         hints
     }

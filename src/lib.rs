@@ -5,8 +5,12 @@
 //! - [`Task`] is a cloneable observable future. Store it in a service when
 //!   multiple pages need the same result. Give it a [`Redraw`] signal so the
 //!   application repaints when the snapshot changes.
-//! - [`Page`] owns route-local state and behavior.
-//! - [`Navigator`] owns the route stack and page lifecycle.
+//! - [`Page`] owns route-local state and behavior. Its route type defaults to
+//!   [`Context::Route`], but a shell page can embed an [`Navigator`] for a
+//!   section-local route type.
+//! - [`Navigator`] owns a route stack and page lifecycle.
+//! - [`ModalHost`] owns a callback-driven modal stack for prompts, pickers, and
+//!   confirmations.
 //! - [`App`] drives rendering and key routing on the current tokio runtime.
 //!
 //! [`Task`] and [`App::run`] require a tokio runtime; pages themselves are
@@ -15,6 +19,7 @@
 pub mod app;
 pub mod context;
 pub mod input;
+pub mod modal;
 pub mod navigator;
 pub mod page;
 pub mod redraw;
@@ -24,6 +29,7 @@ pub mod task_cache;
 pub use app::{App, AppFlow, hint_line};
 pub use context::Context;
 pub use input::{FocusRing, KeyChord, KeyHint, KeyMap};
+pub use modal::{IntoPageEvent, Modal, ModalHost, ModalOutcome, ModalPage, WithModal};
 pub use navigator::{NavAction, Navigator, Router};
 pub use page::{Page, PageEvent};
 pub use redraw::Redraw;
