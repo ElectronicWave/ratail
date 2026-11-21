@@ -2,9 +2,9 @@
 
 [English](README.md) | 简体中文
 
-**轻量级 ratatui 异步框架。**
+轻量级 ratatui 异步 UI 框架。页面同步、状态分片、异步结果可观察；没有全局 action 总线和固定帧率。
 
-`ratail` 把路由内的状态放在页面里，把共享的应用状态放在带类型的 `Context` 里。输入处理是声明式的；异步任务的结果可以被观察：所有页面看到同一份快照，快照变化时 UI 才重绘。
+## 安装
 
 ```toml
 [dependencies]
@@ -14,46 +14,47 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
 > [!NOTE]
-> `ratail` 只跑在 tokio 上。页面是同步的，异步工作放在 `Context` 里的 `Task` 中。
+> 只支持 tokio。页面是同步的，异步工作放在 `Context` 里的 `Task` 中。
 
-## ratail 做了什么
+## 架构
 
-- 每个页面自己管状态，不需要一个中央 app 结构体把所有屏幕的字段攒在一起。
-- 共享的异步数据放在 `Context` 的领域服务里，每个页面读同一份快照。
-- 快照变化时，任务通过 `Redraw` 唤醒事件循环，业务状态不用定时轮询。
-- 页面直接返回 `PageEvent::Navigate`，导航不经过信道。
-- `KeyMap` 在页面里把按键绑到 action 和提示；全局按键用闭包注册。
-- 框架不内置退出键、action 枚举或帧间隔。
+```text
+terminal key ─┐
+              ├─> App::run ─> Navigator ─> current Page
+Redraw ───────┘                 └─ on_key / poll / render
 
-## 核心概念
+Task completes -> update snapshot -> Redraw.trigger()
+```
 
-| 类型 | 职责 |
-| --- | --- |
-| `Context` | 带类型领域服务的组合根，以及路由类型和重绘信号 |
-| `Task<T, E>` | 可克隆、可观察的异步任务，快照包含 `Idle`、`Loading`、`Ready`、`Error` 和 `Cancelled` |
-| `TaskCache<K, T, E>` | 带键的 LRU 任务缓存，共用同一个 `Redraw`，每个键维护独立快照 |
-| `Page` | 路由内的状态、按键处理和渲染 |
-| `PageEvent` | 页面对一次按键的回答：忽略、已处理，或导航意图 |
-| `Navigator` | 路由栈和页面生命周期（`init`、`resume`、`pause`、`dispose`） |
-| `ModalHost` / `ModalPage` | 回调驱动的弹窗栈与零样板页面包装器 |
-| `App` | 事件循环、全局优先的按键路由、页面分发和自动提示栏 |
-| `Redraw` | 任务和应用循环共享的重绘信号 |
+`App::run` 只有两个唤醒源：终端事件和 `Redraw`。按键交给当前页面的 `on_key`；异步状态变化交给 `poll`。每次 redraw 最多 poll 当前页面一次，并最多应用一个 `NavAction`。
+
+状态放在哪里：
+
+- **页面本地状态**：只属于当前路由实例，页面被移除后消失。
+- **`Context` 服务**：跨页面共享，页面通过只读的 `&C` 和领域服务方法访问。
+- **`Task` / `TaskCache`**：异步结果；`render` 读快照，`poll` 做一次性转换。
+
+整体是**分片式 MVU + immediate-mode 渲染**：每个页面负责自己的状态转换，没有中央 model、全局 action 或虚拟 DOM。
 
 ## 快速开始
 
-下面的代码只画出核心协议。完整可运行的例子在 [`examples/catalog.rs`](examples/catalog.rs)。
-
-### 服务与 Context
+以下片段省略了部分 import；完整示例见 [`examples/catalog.rs`](examples/catalog.rs)。
 
 ```rust
 struct Services {
-    ui: UiService,
-    catalog: CatalogService,
+    redraw: Redraw,
+    catalog: Task<Catalog, String>,
 }
 
 impl Services {
-    fn catalog(&self) -> &CatalogService {
-        &self.catalog
+    fn new() -> Self {
+        let redraw = Redraw::new();
+        let catalog = Task::with_redraw(&redraw);
+        Self { redraw, catalog }
+    }
+
+    fn reload(&self) {
+        self.catalog.spawn_once(load_catalog);
     }
 }
 
@@ -61,85 +62,56 @@ impl Context for Services {
     type Route = Route;
 
     fn redraw(&self) -> &Redraw {
-        self.ui.redraw()
-    }
-}
-```
-
-多领域应用可以把 `Services` 当作组合根。字段保持私有，通过访问器暴露领域服务，
-并让每个服务持有自己的任务：
-
-```rust
-struct UiService {
-    redraw: Redraw,
-}
-
-impl UiService {
-    fn redraw(&self) -> &Redraw {
         &self.redraw
     }
 }
-
-struct CatalogService {
-    catalog: Task<Catalog, String>,
-}
-
-impl CatalogService {
-    fn new(redraw: &Redraw) -> Self {
-        Self {
-            catalog: Task::with_redraw(redraw),
-        }
-    }
-
-    fn snapshot(&self) -> Arc<Snapshot<Catalog, String>> {
-        self.catalog.snapshot()
-    }
-
-    fn reload(&self) {
-        self.catalog.spawn_once(load_catalog);
-    }
-}
 ```
 
-把所有服务都接到同一个 `Redraw` 上。页面调用 `ctx.catalog().reload()` 这样的服务方法，
-不要直接碰 `spawn_once`，也不要自己创建任务。只有一两个任务的小应用可以保持扁平的 `Services`。
-
-### 一个页面
-
 ```rust
-impl Page<Services> for Dashboard {
-    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
-        match self.keys.action_for(&key) {
-            Some(Action::Reload) => {
-                ctx.catalog().reload();
-                PageEvent::Handled
-            }
-            Some(Action::Details) => PageEvent::Navigate(NavAction::Push(Route::Details)),
-            None => PageEvent::Ignored,
-        }
+struct Home;
+
+impl Page<Services> for Home {
+    fn init(&mut self, ctx: &Services, _route: &Route) {
+        ctx.reload();
     }
 
-    fn keybindings(&self, _route: &Route) -> Vec<KeyHint> {
-        self.keys.hints().to_vec()
+    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
+        match key.code {
+            KeyCode::Char('r') => {
+                ctx.reload();
+                PageEvent::Handled
+            }
+            _ => PageEvent::Ignored,
+        }
     }
 
     fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
-        draw_catalog(&ctx.catalog().snapshot(), frame, area);
+        let snapshot = ctx.catalog.snapshot();
+        let text = match &*snapshot {
+            Snapshot::Ready(value) => value.as_str(),
+            Snapshot::Error { error, .. } => error.as_str(),
+            _ => "loading...",
+        };
+        frame.render_widget(Paragraph::new(text), area);
     }
 }
 ```
 
-### 应用入口
-
 ```rust
+struct AppRouter;
+
+impl Router<Services> for AppRouter {
+    fn create(&mut self, _route: &Route, _ctx: &Services) -> Box<dyn Page<Services>> {
+        Box::new(Home)
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
-    let mut app = App::new(Services::new(), AppRouter, Route::Dashboard);
-    app.bind_global(
-        KeyChord::ctrl('q'),
-        KeyHint::new("Ctrl+Q", "quit"),
-        |_| AppFlow::Exit,
-    );
+    let mut app = App::new(Services::new(), AppRouter, Route::Home);
+    app.bind_global(KeyChord::ctrl('q'), KeyHint::new("Ctrl+Q", "quit"), |_| {
+        AppFlow::Exit
+    });
 
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal).await;
@@ -148,223 +120,59 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-## 共享异步状态
+## 核心概念
 
-`Task` 解决的是：多个地方调用同一个异步操作，读同一份结果。把它放在拥有该请求的领域服务里。
+| 类型 | 职责 |
+| --- | --- |
+| `Context` | 带类型领域服务的组合根，以及路由类型和重绘信号 |
+| `Task<T, E>` | 可克隆、可观察的异步任务；快照包含 `Idle`、`Loading`、`Ready`、`Error`、`Cancelled` |
+| `TaskCache<K, T, E>` | 带 key 的 LRU 任务缓存，默认 32 条；淘汰时取消进行中的请求 |
+| `Page` | 路由局部状态、按键处理、`poll` 和渲染 |
+| `PageEvent` / `NavAction` | 页面对按键的回答，以及 `Push`、`Pop`、`Replace`、`Reset` 导航意图 |
+| `Navigator` | 路由栈和 `init`、`resume`、`pause`、`dispose` 生命周期 |
+| `ModalHost` / `ModalPage` | 回调驱动的弹窗栈和零样板页面包装器 |
+| `App` / `Redraw` | 事件循环，以及任务和循环共享的重绘信号 |
 
-- `Task` 克隆很便宜，可以放进服务里。
-- 已经有任务在跑时，`spawn_once` 不会再启动一次。
-- `Loading` 和 `Error` 会保留上一次的值，页面可以在报错时继续显示旧数据。
-- `snapshot()` 返回当前状态，`value()`、`previous()` 和 `error()` 覆盖常见的读法；需要同时渲染旧数据和错误时用 `view()` 摊平状态、数据和错误。
-- 身份基于 `Arc`，不需要分配任务 ID，也不用担心 ID 溢出。
+## 异步状态
 
-### 带参数的请求
+`Task` 保存最新一次异步结果，多个 clone 共享同一份快照。`Loading` 和 `Error` 会保留上一次的值，可以用 `previous()` 在加载或报错时继续显示旧数据。
 
-请求依赖某个参数时，比如 driver、账号或路由 ID，使用 `TaskCache`。每个键都相当于一个独立的 `Task`，不同参数的结果不会互相覆盖。它更像按 key 查询的缓存，而不是 React 的 `useEffect` 依赖列表。缓存默认最多保留 32 个条目；插入新键时会淘汰最久未使用的条目并取消其进行中的请求。需要其他上限时使用 `TaskCache::with_capacity`。
+`TaskCache` 适合按参数缓存请求，例如 driver、账号或路由 ID。它只有 LRU 容量限制，没有 TTL；数据刷新由业务显式调用 `reload()` 之类的方法。
+
+任务完成只触发 `Redraw`，不会直接回调页面。页面在 `poll` 中读取快照并完成状态转换：
 
 ```rust
-struct CatalogService {
-    catalogs: TaskCache<Driver, Catalog, Error>,
-}
-
-impl CatalogService {
-    fn catalog(&self, driver: Driver) -> Task<Catalog, Error> {
-        self.catalogs.get_or_create(&driver)
+fn poll(&mut self, ctx: &Services, _route: &Route) -> Option<NavAction<Route>> {
+    if self.waiting && ctx.catalog.snapshot().value().is_some() {
+        self.waiting = false;
+        return Some(NavAction::Push(Route::Details));
     }
-
-    fn load_catalog(&self, driver: Driver) -> bool {
-        self.catalogs.spawn_once(driver, load_catalog)
-    }
-}
-
-async fn load_catalog(driver: Driver) -> Result<Catalog, Error> {
-    // 拉取这个 driver 的 catalog
+    None
 }
 ```
 
-`spawn_once` 接收 key，并把它传给请求函数。页面切换到另一个 key 时读取的是那个 key 的快照，不会覆盖之前的结果。
+`poll` 不是帧 tick，也不会因为按键变化而调用；它必须便宜且幂等。只有当前页面会被 poll，暂停的页面应在 `resume` 时补状态。
 
-某个 key 需要提前移除时调用 `remove` 或 `clear`，两者都会取消进行中的请求。`get_or_create` 和 `spawn_once` 算作使用，会刷新 LRU 顺序。`snapshot` 是轻量读取：对从未请求过的 key 返回 `None`，也不会改变 recency，因此渲染不会让 key 一直存活。多个参数时，直接用元组或结构体作为 key。
+## 导航与弹窗
 
-读取快照仍然是显式的：
-
-```rust
-match &*ctx.catalog().snapshot() {
-    Snapshot::Idle => {}
-    Snapshot::Loading { previous } => {}
-    Snapshot::Ready(catalog) => {}
-    Snapshot::Error { error, previous } => {}
-    Snapshot::Cancelled { previous } => {}
-}
-```
-
-需要同时渲染旧数据和错误时，先把快照摊平。`view()` 即使 `data` 来自上一次结果，也会保留 `error`：
-
-```rust
-let snapshot = ctx.catalog().snapshot();
-let view = snapshot.view();
-
-if let Some(catalog) = view.data {
-    draw_catalog(catalog, frame, area);
-}
-if let Some(error) = view.error {
-    draw_error(error, frame, area);
-}
-```
-
-> [!TIP]
-> 一个应用里共用同一个 `Redraw`。下一帧之前的多次触发会合并成一次重绘。
-
-## 声明式输入与导航
-
-绑按键时顺手把提示写在一起：
-
-```rust
-keys.bind_with_hint(
-    KeyChord::char('r'),
-    Action::Reload,
-    KeyHint::new("r", "reload"),
-);
-keys.bind_with_hint(
-    KeyChord::char('d'),
-    Action::Details,
-    KeyHint::new("d", "details"),
-);
-```
-
-`App` 把页面提示和全局提示画在同一行页脚里，页面不用在每个屏幕里重复框架或应用的快捷键。
-需要不同布局或主题时，用 `App::set_hint_renderer` 替换页脚；`hint_line` 会生成默认的 spans。
-
-全局绑定是保留按键。`App` 在把按键分发给页面前先解析全局绑定，因此页面返回
-`PageEvent::Handled` 也不会遮蔽全局快捷键。页面需要使用某个按键时，不要把它注册为全局绑定。
-
-导航由页面返回：`PageEvent::Navigate` 接受 `NavAction::Push`、`Pop`、`Replace`
-或 `Reset`。Navigator 会立刻应用这个动作：对旧页面执行 `pause`/`dispose`，再对
-新页面执行 `init`/`resume`。
-
-### 嵌套导航
-
-`Page`、`Router` 和 `Navigator` 都以路由类型为泛型参数。Shell 页面因此可以直接
-持有一个局部导航器，而不必在 `on_key` 里手写 `Screen`/`Mode` 枚举：
-
-```rust
-enum AccountRoute {
-    List,
-    Skins(u64),
-}
-
-struct AccountRouter;
-
-impl Router<Services, AccountRoute> for AccountRouter {
-    fn create(
-        &mut self,
-        route: &AccountRoute,
-        ctx: &Services,
-    ) -> Box<dyn Page<Services, AccountRoute>> {
-        match route {
-            AccountRoute::List => Box::new(AccountListPage::new()),
-            AccountRoute::Skins(id) => Box::new(ModalPage::new(SkinsPage::new(*id, ctx))),
-        }
-    }
-}
-
-struct AccountsShell {
-    nav: Navigator<Services, AccountRoute, AccountRouter>,
-}
-```
-
-使用 `Navigator` 上的一行辅助方法转发按键、提示、渲染与生命周期：
-
-```rust
-if self.nav.handle_key(ctx, key) {
-    return PageEvent::Handled;
-}
-```
-
-`nav.render(ctx, frame, area)`、`nav.keybindings()`、`nav.resume_current(ctx)`、
-`nav.pause_current(ctx)` 和 `nav.dispose_all(ctx)` 负责转发其余 `Page` 钩子。
-当局部路由栈处于根页面并对 `Esc` 返回 `Ignored` 时，`handle_key` 返回 `false`，
-外层 Shell 可以直接接管（例如把焦点切回侧边栏）。
-
-### 回调驱动弹窗
-
-`ModalHost<C, S, R>` 持有当前弹窗栈，并在打开弹窗时保存完成回调。用
-`ModalPage::new(...)` 包装页面并实现 `WithModal<C, R>`，页面结构体甚至不需要
-`modals` 字段或拆出单独的 `State` 结构体——完成回调直接拿到 `&mut Self`，并且可以
-返回 `()`、`NavAction<R>` 或 `PageEvent<R>`：
-
-```rust
-struct SkinsPage {
-    account_id: u64,
-    keys: KeyMap<Action>,
-}
-
-impl SkinsPage {
-    fn open_import(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
-        modals.open(FilePicker::png(), |page, _ctx, modals, path| {
-            modals.open(TextPrompt::new("name", default_name(&path)), move |page, ctx, _, name| {
-                ctx.skins().import(page.account_id, name, path);
-            });
-        });
-    }
-
-    fn confirm_delete_account(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
-        modals.open(Confirm::new("Delete account?"), |page, ctx, _, ()| {
-            ctx.accounts().remove(page.account_id);
-            NavAction::Pop
-        });
-    }
-}
-```
-
-`Modal::on_key` 返回 `ModalOutcome::Completed(value)` 会执行回调，`Cancelled`
-关闭弹窗但不执行，`Handled` 表示消费按键，`Ignored` 留给页面处理。`ModalPage`
-会自动把按键优先路由给顶层弹窗、在页面上方叠加渲染所有激活弹窗，并在弹窗打开时用
-顶层弹窗的提示替换页面提示。需要手动控制时，也可以直接内嵌 `ModalHost` 并调用
-`modals.dispatch_key(&mut state, ctx, key)`。
-
-## 与官方 async action flow 对比
-
-[`async-github`](https://github.com/ratatui/ratatui/tree/main/examples/apps/async-github)
-示例把 widget 状态放在 `Arc<RwLock<_>>` 里，以固定 60 FPS 重绘。
-[官方 async 模板](https://github.com/ratatui/ratatui-website/tree/main/code/templates/components_async)
-则让输入、tick 和后台结果都经过同一个
-`mpsc::unbounded_channel::<Action>()`，由应用在一个中央 `match` 里分发。
-
-`ratail` 用带类型的句柄和页面直接输出来替代这条总线：共享异步数据是 `Context`
-领域服务里的 `Task`，页面返回 `PageEvent`，`Redraw` 只在快照变化时唤醒循环。
-
-| 关注点 | 官方 action-channel 流程 | ratail |
-| --- | --- | --- |
-| 消息传输 | 一个无界 `Action` 信道 | 带类型的 `Task` 句柄，加上直接返回的 `PageEvent` |
-| 分发 | 应用里集中 `match action` | 页面内自己 match；没有应用级枚举 |
-| 后台结果 | 生产者发 `Action::...` | Task 更新自己的快照 |
-| 跨页数据 | 消息载荷和组件状态 | 把 `Task` 放进 `Context` |
-| 加载/错误 | 手写状态变体 | `Snapshot` 自带，并保留上一次的值 |
-| 重绘 | 固定 tick 或帧率 | `Redraw` 只在快照变化时唤醒循环 |
-| 导航 | 再加一个 `Action` 变体 | `PageEvent::Navigate` |
-| 输入 | 键位到 `Action`，再到信道 | `KeyMap` 到 `PageEvent`；全局键是闭包 |
-| 提示 | 键位配置或手写字符串 | 框架把页面和全局提示合并到页脚 |
-| 策略 | 模板定义 `Quit`、`Tick` 等 action | 不内置退出键、action 枚举或帧间隔 |
-
-这是一个有意的取舍：Action 信道是通用的 pub/sub 总线，而 `ratail` 把共享状态
-当成带类型的服务、把页面输出当成意图。你省掉了通用总线和中央分发器，代价是
-自己实现 `Context`、`Page` 和 `Router`。
+- 页面返回 `PageEvent::Navigate(NavAction::...)`，`Navigator` 立即应用并执行页面生命周期。
+- 页面被 `Pop`、`Replace` 或 `Reset` 移除后，本地状态会消失；需要保留的状态放进服务。
+- Shell 页面可以持有嵌套 `Navigator`，把路由按区域拆开。
+- `ModalHost` 保存弹窗及其完成回调；`ModalPage` 自动转发按键、渲染、提示和 `poll`。
+- 弹窗完成回调可以直接修改页面，也可以返回 `NavAction` 继续导航。
 
 ## 示例
-
-catalog 例子跑通了整套流程：
 
 ```bash
 cargo run --example catalog
 ```
 
-它有两个路由，读同一个 `Task`。在任一页面按 `r` 只会发一次共享请求，两个页面显示同一个结果。第三次请求故意失败，用来看错误怎么渲染、旧数据怎么保留。`d` 进详情，`Backspace` 返回，`Ctrl+Q` 由应用注册。
+示例有两个路由，共享同一个 `Task`；`r` 发起请求，`d` 进入详情，`Backspace` 返回，`Ctrl+Q` 退出。
 
 ## 限制
 
-- `App::run` 是 async 的，跑在一个 tokio task 上；页面和渲染是同步的，`Page::on_key` 里不能 `await`。`Task` 会启动后台工作，所以服务类型必须满足 `Send + Sync`。
-- `App` 把 `Event::Key` 交给页面。窗口缩放会触发重绘，但鼠标、粘贴和焦点事件不会送到页面。
-- `Task` 只存一份快照，已有任务在跑时 `spawn_once` 直接跳过。没有进度流、重试、退避或多消费者队列。
-- `Task::new()` 不会唤醒 UI，要用 `Task::with_redraw`。动画需要单独的定时任务调用 `Redraw::trigger`。
-- Navigator 把路由存在 `Vec` 里，没有持久化、深链接恢复或路由参数序列化。
+- 页面和渲染是同步的，`Page::on_key` 不能 `await`。
+- 只把 `Event::Key` 交给页面；鼠标、粘贴和焦点事件不会分发。
+- `Task` 只保留最新快照，没有进度流、重试、退避或多消费者队列。
+- `Task::new()` 不会唤醒 UI；需要自动重绘时使用 `Task::with_redraw`。
+- 路由只存在内存中的 `Vec` 里，没有持久化、深链接恢复或参数序列化。
