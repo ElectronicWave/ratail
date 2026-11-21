@@ -159,9 +159,11 @@ impl<C: Context, R, Rt: Router<C, R>> Navigator<C, R, Rt> {
     /// Forwards a key to the current page and applies any resulting
     /// [`NavAction`] to this navigator.
     ///
-    /// Returns `true` when the current page handled the key or navigated, and
-    /// `false` when it returned [`PageEvent::Ignored`] (allowing an outer shell
-    /// page to handle keys like `Esc` when the sub-navigator is at its root).
+    /// Returns `true` when the current page handled the key or the navigation
+    /// action changed the stack, and `false` when it returned
+    /// [`PageEvent::Ignored`] or a no-op navigation such as [`NavAction::Pop`]
+    /// at the root (allowing an outer shell page to handle keys like `Esc` when
+    /// the sub-navigator is at its root).
     pub fn handle_key(&mut self, ctx: &C, key: KeyEvent) -> bool {
         let event = match self.current_mut() {
             Some((route, page)) => page.on_key(ctx, route, key),
@@ -171,10 +173,7 @@ impl<C: Context, R, Rt: Router<C, R>> Navigator<C, R, Rt> {
         match event {
             PageEvent::Ignored => false,
             PageEvent::Handled => true,
-            PageEvent::Navigate(action) => {
-                self.apply(action, ctx);
-                true
-            }
+            PageEvent::Navigate(action) => self.apply(action, ctx),
         }
     }
 
