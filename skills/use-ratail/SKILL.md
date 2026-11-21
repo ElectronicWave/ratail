@@ -83,7 +83,7 @@ event loop when a run finishes.
 
 Store a task in a domain service when several pages need the same result. A page-local task is also valid if it has a `Redraw`.
 
-When the request depends on a parameter (driver, account, route id), use `TaskCache<K, T, E>` instead of one shared `Task`. It is a keyed query cache, not a `useEffect` dependency list: entries persist until `remove` or `clear`. Each key keeps its own snapshot, so switching parameters never overwrites another result. `spawn_once` takes the key and passes it to the request function:
+When the request depends on a parameter (driver, account, route id), use `TaskCache<K, T, E>` instead of one shared `Task`. It is a keyed LRU query cache, not a `useEffect` dependency list. It holds at most 32 entries by default; inserting a new key evicts the least recently used entry and cancels its in-flight request. Use `TaskCache::with_capacity` to choose another bound. Each key keeps its own snapshot, so switching parameters never overwrites another result. `spawn_once` takes the key and passes it to the request function:
 
 ```rust
 struct CatalogService {
@@ -101,7 +101,7 @@ impl CatalogService {
 }
 ```
 
-For multiple parameters, use a tuple or a struct deriving `Clone + Eq + Hash` as the key. Use `snapshot` to read without creating an entry, and `remove`/`clear` to cancel and evict when the key space can grow.
+For multiple parameters, use a tuple or a struct deriving `Clone + Eq + Hash` as the key. Use `snapshot` for cheap reads that do not create an entry or change LRU recency. Use `get`, `get_or_create`, or `spawn_once` when a read should count as use, and `remove`/`clear` to cancel and evict early.
 
 ```rust
 match &*ctx.catalog().snapshot() {

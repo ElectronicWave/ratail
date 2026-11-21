@@ -484,6 +484,7 @@ dependencies = [
  "arc-swap",
  "crossterm",
  "futures-core",
+ "lru",
  "ratatui",
  "tokio",
 ]

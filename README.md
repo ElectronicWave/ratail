@@ -31,7 +31,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | --- | --- |
 | `Context` | Composition root for typed domain services, plus the route type and repaint signal |
 | `Task<T, E>` | Cloneable observable async task with `Idle`, `Loading`, `Ready`, `Error`, and `Cancelled` snapshots |
-| `TaskCache<K, T, E>` | Keyed task cache sharing one `Redraw`; each key keeps an independent snapshot |
+| `TaskCache<K, T, E>` | Keyed LRU task cache sharing one `Redraw`; each key keeps an independent snapshot |
 | `Page` | Route-local state, key handling, and rendering |
 | `PageEvent` | The page's answer to a key: ignored, handled, or a navigation intent |
 | `Navigator` | Route stack and page lifecycle (`init`, `resume`, `pause`, `dispose`) |
@@ -163,7 +163,7 @@ one result. Keep it in the domain service that owns the request.
 
 ### Parameterized requests
 
-When the request depends on a parameter, such as a driver, account, or route id, use `TaskCache`. Every key behaves like a separate `Task`, so results for different parameters never overwrite each other. Think of it as a keyed query cache, not as React's `useEffect` dependency list: entries are retained until you remove them.
+When the request depends on a parameter, such as a driver, account, or route id, use `TaskCache`. Every key behaves like a separate `Task`, so results for different parameters never overwrite each other. Think of it as a keyed query cache, not as React's `useEffect` dependency list. The cache holds at most 32 entries by default; inserting a new key evicts the least recently used entry and cancels its in-flight request. Use `TaskCache::with_capacity` to choose another bound.
 
 ```rust
 struct CatalogService {
@@ -187,7 +187,7 @@ async fn load_catalog(driver: Driver) -> Result<Catalog, Error> {
 
 `spawn_once` takes the key and passes it to the request function. Switching a page to another key reads that key's snapshot instead of replacing the previous result.
 
-Call `remove` or `clear` when a key is no longer needed; both cancel in-flight requests. `snapshot` returns `None` for keys that were never requested, so rendering stays free of hidden cache writes. For several parameters, use a tuple or a struct as the key.
+Call `remove` or `clear` when a key should be dropped early; both cancel in-flight requests. `get_or_create` and `spawn_once` count as use and refresh LRU recency. `snapshot` is a cheap read that returns `None` for keys that were never requested and does not change recency, so rendering does not keep keys alive. For several parameters, use a tuple or a struct as the key.
 
 Reading a snapshot stays explicit:
 
