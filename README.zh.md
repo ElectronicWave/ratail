@@ -31,7 +31,7 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 | --- | --- |
 | `Context` | 带类型领域服务的组合根，以及路由类型和重绘信号 |
 | `Task<T, E>` | 可克隆、可观察的异步任务，快照包含 `Idle`、`Loading`、`Ready`、`Error` 和 `Cancelled` |
-| `TaskCache<K, T, E>` | 带键的任务缓存，共用同一个 `Redraw`，每个键维护独立快照 |
+| `TaskCache<K, T, E>` | 带键的 LRU 任务缓存，共用同一个 `Redraw`，每个键维护独立快照 |
 | `Page` | 路由内的状态、按键处理和渲染 |
 | `PageEvent` | 页面对一次按键的回答：忽略、已处理，或导航意图 |
 | `Navigator` | 路由栈和页面生命周期（`init`、`resume`、`pause`、`dispose`） |
@@ -160,7 +160,7 @@ async fn main() -> std::io::Result<()> {
 
 ### 带参数的请求
 
-请求依赖某个参数时，比如 driver、账号或路由 ID，使用 `TaskCache`。每个键都相当于一个独立的 `Task`，不同参数的结果不会互相覆盖。它更像按 key 查询的缓存，而不是 React 的 `useEffect` 依赖列表：条目会一直保留，直到你主动移除。
+请求依赖某个参数时，比如 driver、账号或路由 ID，使用 `TaskCache`。每个键都相当于一个独立的 `Task`，不同参数的结果不会互相覆盖。它更像按 key 查询的缓存，而不是 React 的 `useEffect` 依赖列表。缓存默认最多保留 32 个条目；插入新键时会淘汰最久未使用的条目并取消其进行中的请求。需要其他上限时使用 `TaskCache::with_capacity`。
 
 ```rust
 struct CatalogService {
@@ -184,7 +184,7 @@ async fn load_catalog(driver: Driver) -> Result<Catalog, Error> {
 
 `spawn_once` 接收 key，并把它传给请求函数。页面切换到另一个 key 时读取的是那个 key 的快照，不会覆盖之前的结果。
 
-某个 key 不再需要时调用 `remove` 或 `clear`，两者都会取消进行中的请求。`snapshot` 对从未请求过的 key 返回 `None`，渲染路径不会偷偷写入缓存。多个参数时，直接用元组或结构体作为 key。
+某个 key 需要提前移除时调用 `remove` 或 `clear`，两者都会取消进行中的请求。`get_or_create` 和 `spawn_once` 算作使用，会刷新 LRU 顺序。`snapshot` 是轻量读取：对从未请求过的 key 返回 `None`，也不会改变 recency，因此渲染不会让 key 一直存活。多个参数时，直接用元组或结构体作为 key。
 
 读取快照仍然是显式的：
 

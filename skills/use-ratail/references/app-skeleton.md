@@ -198,7 +198,7 @@ async fn main() -> std::io::Result<()> {
 ## Variations
 
 - Shared task across routes: keep the `Task` in its domain service and read the same snapshot from each page.
-- Parameterized request: store a `TaskCache<K, T, E>` in the domain service when each key needs its own snapshot, such as a catalog per driver. Treat it as a cache and evict keys that can grow without bound.
+- Parameterized request: store a `TaskCache<K, T, E>` in the domain service when each key needs its own snapshot, such as a catalog per driver. The cache is LRU-bounded (32 entries by default); use `TaskCache::with_capacity` when that bound does not fit.
 - New domain area: add a service struct with private fields, construct it in `Services::new`, inject the shared `Redraw`, and expose the service through an accessor.
 - Page-local task: store the `Task` in the page and create it with `Task::with_redraw(ctx.redraw())`.
 - No action enum: match `KeyEvent` directly in `on_key` and still return `PageEvent`.
