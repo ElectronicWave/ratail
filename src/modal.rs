@@ -32,6 +32,15 @@ pub trait Modal<C: Context> {
     type Value;
 
     fn on_key(&mut self, ctx: &C, key: KeyEvent) -> ModalOutcome<Self::Value>;
+
+    /// Runs after a redraw when the modal may own async work.
+    ///
+    /// Returning [`ModalOutcome::Completed`] pops the modal and runs its
+    /// completion callback.
+    fn poll(&mut self, _ctx: &C) -> ModalOutcome<Self::Value> {
+        ModalOutcome::Ignored
+    }
+
     fn render(&mut self, ctx: &C, frame: &mut Frame, area: Rect);
 
     fn keybindings(&self) -> Vec<KeyHint> {
@@ -156,6 +165,32 @@ impl<C: Context, S: 'static, R: 'static> ModalHost<C, S, R> {
         self.dispatch_key(state, ctx, key).is_some()
     }
 
+    /// Polls the top modal.
+    ///
+    /// Returns a navigation action when an asynchronously completed modal runs
+    /// a callback that navigates.
+    pub fn poll(&mut self, state: &mut S, ctx: &C) -> Option<NavAction<R>> {
+        let flow = self.stack.last_mut()?.poll(ctx);
+
+        match flow {
+            EntryFlow::Ignored | EntryFlow::Handled => None,
+            EntryFlow::Cancelled => {
+                self.stack.pop();
+                None
+            }
+            EntryFlow::Completed => {
+                let mut modal = self
+                    .stack
+                    .pop()
+                    .expect("the modal stack cannot be empty while completing a modal");
+                match modal.complete(state, ctx, self) {
+                    PageEvent::Navigate(action) => Some(action),
+                    PageEvent::Ignored | PageEvent::Handled => None,
+                }
+            }
+        }
+    }
+
     /// Renders every active modal in stack order, with newer modals on top.
     pub fn render(&mut self, ctx: &C, frame: &mut Frame, area: Rect) {
         for modal in &mut self.stack {
@@ -203,6 +238,15 @@ pub trait WithModal<C: Context, R = <C as Context>::Route>: Sized + 'static {
         _key: KeyEvent,
     ) -> PageEvent<R> {
         PageEvent::Ignored
+    }
+
+    fn poll(
+        &mut self,
+        _ctx: &C,
+        _route: &R,
+        _modals: &mut ModalHost<C, Self, R>,
+    ) -> Option<NavAction<R>> {
+        None
     }
 
     fn keybindings(&self, _route: &R) -> Vec<KeyHint> {
@@ -270,6 +314,13 @@ impl<C: Context, P: WithModal<C, R>, R: 'static> Page<C, R> for ModalPage<C, P, 
         self.page.on_key(ctx, route, &mut self.modals, key)
     }
 
+    fn poll(&mut self, ctx: &C, route: &R) -> Option<NavAction<R>> {
+        if let Some(action) = self.modals.poll(&mut self.page, ctx) {
+            return Some(action);
+        }
+        self.page.poll(ctx, route, &mut self.modals)
+    }
+
     fn keybindings(&self, route: &R) -> Vec<KeyHint> {
         self.modals
             .keybindings()
@@ -292,6 +343,7 @@ enum EntryFlow {
 
 trait ModalEntry<C: Context, S, R> {
     fn on_key(&mut self, ctx: &C, key: KeyEvent) -> EntryFlow;
+    fn poll(&mut self, ctx: &C) -> EntryFlow;
     fn complete(&mut self, state: &mut S, ctx: &C, host: &mut ModalHost<C, S, R>) -> PageEvent<R>;
     fn render(&mut self, ctx: &C, frame: &mut Frame, area: Rect);
     fn keybindings(&self) -> Vec<KeyHint>;
@@ -312,6 +364,18 @@ where
 {
     fn on_key(&mut self, ctx: &C, key: KeyEvent) -> EntryFlow {
         match self.modal.on_key(ctx, key) {
+            ModalOutcome::Ignored => EntryFlow::Ignored,
+            ModalOutcome::Handled => EntryFlow::Handled,
+            ModalOutcome::Cancelled => EntryFlow::Cancelled,
+            ModalOutcome::Completed(value) => {
+                self.value = Some(value);
+                EntryFlow::Completed
+            }
+        }
+    }
+
+    fn poll(&mut self, ctx: &C) -> EntryFlow {
+        match self.modal.poll(ctx) {
             ModalOutcome::Ignored => EntryFlow::Ignored,
             ModalOutcome::Handled => EntryFlow::Handled,
             ModalOutcome::Cancelled => EntryFlow::Cancelled,

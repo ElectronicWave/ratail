@@ -2,9 +2,11 @@
 
 English | [简体中文](README.zh.md)
 
-**Lightweight async framework for ratatui.**
+Lightweight async UI framework for ratatui. Pages are synchronous, state is
+route-local, and async results are observable; there is no global action bus or
+fixed frame rate.
 
-`ratail` keeps route-local state in pages and shared application state in a typed `Context`. Input handling is declarative, and async task results are observable: every page sees the same snapshot, and the UI repaints when that snapshot changes.
+## Install
 
 ```toml
 [dependencies]
@@ -14,46 +16,52 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 ```
 
 > [!NOTE]
-> `ratail` only runs on tokio. Pages are synchronous; async work lives in `Task`s stored in the context.
+> ratail only runs on tokio. Pages are synchronous; async work lives in
+> `Task`s stored in the `Context`.
 
-## What ratail does
+## Architecture
 
-- Pages own their state. There is no central app struct collecting every screen's fields.
-- Shared async data lives in a domain service inside the `Context`. Every page reads the same snapshot.
-- Tasks wake the event loop through `Redraw` when their snapshot changes, so business state needs no polling interval.
-- A page returns `PageEvent::Navigate` to move; navigation does not go through a channel.
-- Page-local `KeyMap`s carry actions and hints. Global keys are registered as closures.
-- The framework has no built-in quit key, action enum, or frame interval.
+```text
+terminal key ─┐
+              ├─> App::run ─> Navigator ─> active Page
+Redraw ───────┘                 └─ on_key / poll / render
 
-## Core concepts
+Task completes -> update snapshot -> Redraw.trigger()
+```
 
-| Type | Responsibility |
-| --- | --- |
-| `Context` | Composition root for typed domain services, plus the route type and repaint signal |
-| `Task<T, E>` | Cloneable observable async task with `Idle`, `Loading`, `Ready`, `Error`, and `Cancelled` snapshots |
-| `TaskCache<K, T, E>` | Keyed LRU task cache sharing one `Redraw`; each key keeps an independent snapshot |
-| `Page` | Route-local state, key handling, and rendering |
-| `PageEvent` | The page's answer to a key: ignored, handled, or a navigation intent |
-| `Navigator` | Route stack and page lifecycle (`init`, `resume`, `pause`, `dispose`) |
-| `ModalHost` / `ModalPage` | Callback-driven modal stack and zero-boilerplate page wrapper |
-| `App` | Event loop, global-first key routing, page dispatch, and automatic hint footer |
-| `Redraw` | Repaint signal shared by tasks and the application loop |
+`App::run` has two wake sources: terminal events and `Redraw`. Keys go to the
+active page's `on_key`; async state changes go to `poll`. Each redraw polls the
+active page at most once and applies at most one `NavAction`.
+
+Where state lives:
+
+- **Page-local state** belongs to one route instance and disappears when the page is removed.
+- **`Context` services** are shared across pages and accessed through a read-only `&C` plus domain methods.
+- **`Task` / `TaskCache`** hold async results; render reads snapshots, while poll performs one-shot transitions.
+
+The result is **federated MVU plus immediate-mode rendering**: each page owns its
+own state transitions, with no central model, global action, or virtual DOM.
 
 ## Quick start
 
-The snippets below sketch the core protocols. A complete, runnable app lives in [`examples/catalog.rs`](examples/catalog.rs).
-
-### Services and context
+The snippets below omit some imports; the complete example is in
+[`examples/catalog.rs`](examples/catalog.rs).
 
 ```rust
 struct Services {
-    ui: UiService,
-    catalog: CatalogService,
+    redraw: Redraw,
+    catalog: Task<Catalog, String>,
 }
 
 impl Services {
-    fn catalog(&self) -> &CatalogService {
-        &self.catalog
+    fn new() -> Self {
+        let redraw = Redraw::new();
+        let catalog = Task::with_redraw(&redraw);
+        Self { redraw, catalog }
+    }
+
+    fn reload(&self) {
+        self.catalog.spawn_once(load_catalog);
     }
 }
 
@@ -61,87 +69,56 @@ impl Context for Services {
     type Route = Route;
 
     fn redraw(&self) -> &Redraw {
-        self.ui.redraw()
-    }
-}
-```
-
-For a multi-domain app, treat `Services` as the composition root. Keep its fields
-private, expose domain services through accessors, and let each service own its
-own tasks:
-
-```rust
-struct UiService {
-    redraw: Redraw,
-}
-
-impl UiService {
-    fn redraw(&self) -> &Redraw {
         &self.redraw
     }
 }
-
-struct CatalogService {
-    catalog: Task<Catalog, String>,
-}
-
-impl CatalogService {
-    fn new(redraw: &Redraw) -> Self {
-        Self {
-            catalog: Task::with_redraw(redraw),
-        }
-    }
-
-    fn snapshot(&self) -> Arc<Snapshot<Catalog, String>> {
-        self.catalog.snapshot()
-    }
-
-    fn reload(&self) {
-        self.catalog.spawn_once(load_catalog);
-    }
-}
 ```
 
-Pass the same `Redraw` to every service constructor. Pages call service methods
-such as `ctx.catalog().reload()`; they do not touch `spawn_once` or construct
-tasks directly. A small app with one or two tasks can keep a flat `Services`.
-
-### A page
-
 ```rust
-impl Page<Services> for Dashboard {
-    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
-        match self.keys.action_for(&key) {
-            Some(Action::Reload) => {
-                ctx.catalog().reload();
-                PageEvent::Handled
-            }
-            Some(Action::Details) => PageEvent::Navigate(NavAction::Push(Route::Details)),
-            None => PageEvent::Ignored,
-        }
+struct Home;
+
+impl Page<Services> for Home {
+    fn init(&mut self, ctx: &Services, _route: &Route) {
+        ctx.reload();
     }
 
-    fn keybindings(&self, _route: &Route) -> Vec<KeyHint> {
-        self.keys.hints().to_vec()
+    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
+        match key.code {
+            KeyCode::Char('r') => {
+                ctx.reload();
+                PageEvent::Handled
+            }
+            _ => PageEvent::Ignored,
+        }
     }
 
     fn render(&mut self, ctx: &Services, _route: &Route, frame: &mut Frame, area: Rect) {
-        draw_catalog(&ctx.catalog().snapshot(), frame, area);
+        let snapshot = ctx.catalog.snapshot();
+        let text = match &*snapshot {
+            Snapshot::Ready(value) => value.as_str(),
+            Snapshot::Error { error, .. } => error.as_str(),
+            _ => "loading...",
+        };
+        frame.render_widget(Paragraph::new(text), area);
     }
 }
 ```
 
-### The application
-
 ```rust
+struct AppRouter;
+
+impl Router<Services> for AppRouter {
+    fn create(&mut self, _route: &Route, _ctx: &Services) -> Box<dyn Page<Services>> {
+        Box::new(Home)
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
-    let mut app = App::new(Services::new(), AppRouter, Route::Dashboard);
-    app.bind_global(
-        KeyChord::ctrl('q'),
-        KeyHint::new("Ctrl+Q", "quit"),
-        |_| AppFlow::Exit,
-    );
+    let mut app = App::new(Services::new(), AppRouter, Route::Home);
+    app.bind_global(KeyChord::ctrl('q'), KeyHint::new("Ctrl+Q", "quit"), |_| {
+        AppFlow::Exit
+    });
 
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal).await;
@@ -150,232 +127,67 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-## Shared async state
+## Core concepts
 
-A `Task` is for calling the same async operation from several places and reading
-one result. Keep it in the domain service that owns the request.
+| Type | Responsibility |
+| --- | --- |
+| `Context` | Composition root for typed services, plus the route type and repaint signal |
+| `Task<T, E>` | Cloneable observable task with `Idle`, `Loading`, `Ready`, `Error`, and `Cancelled` snapshots |
+| `TaskCache<K, T, E>` | Keyed LRU task cache, 32 entries by default; eviction cancels in-flight work |
+| `Page` | Route-local state, key handling, `poll`, and rendering |
+| `PageEvent` / `NavAction` | A page's answer to a key, and `Push`, `Pop`, `Replace`, `Reset` navigation intents |
+| `Navigator` | Route stack and `init`, `resume`, `pause`, `dispose` lifecycle |
+| `ModalHost` / `ModalPage` | Callback-driven modal stack and zero-boilerplate page wrapper |
+| `App` / `Redraw` | Event loop and the repaint signal shared by tasks and the loop |
 
-- Cloning a `Task` is cheap enough to store it in a service.
-- `spawn_once` does nothing while a run is already in flight.
-- `Loading` and `Error` keep the previous value, so a page can show stale data next to an error.
-- `snapshot()` returns the current state. `value()`, `previous()`, and `error()` cover the usual reads; `view()` flattens status, data, and error when stale data and an error must be rendered together.
-- Identity is `Arc`-based, so there are no task IDs to allocate or overflow.
+## Async state
 
-### Parameterized requests
+A `Task` stores the latest async result; clones share one snapshot. `Loading` and
+`Error` retain the previous value, so `previous()` can keep stale data visible
+while a request is running or has failed.
 
-When the request depends on a parameter, such as a driver, account, or route id, use `TaskCache`. Every key behaves like a separate `Task`, so results for different parameters never overwrite each other. Think of it as a keyed query cache, not as React's `useEffect` dependency list. The cache holds at most 32 entries by default; inserting a new key evicts the least recently used entry and cancels its in-flight request. Use `TaskCache::with_capacity` to choose another bound.
+`TaskCache` caches requests by parameter, such as driver, account, or route ID.
+It has an LRU capacity bound but no TTL; refresh data explicitly through methods
+such as `reload()`.
+
+Completion only triggers `Redraw`; it does not call the page directly. The page
+reads snapshots and performs state transitions in `poll`:
 
 ```rust
-struct CatalogService {
-    catalogs: TaskCache<Driver, Catalog, Error>,
-}
-
-impl CatalogService {
-    fn catalog(&self, driver: Driver) -> Task<Catalog, Error> {
-        self.catalogs.get_or_create(&driver)
+fn poll(&mut self, ctx: &Services, _route: &Route) -> Option<NavAction<Route>> {
+    if self.waiting && ctx.catalog.snapshot().value().is_some() {
+        self.waiting = false;
+        return Some(NavAction::Push(Route::Details));
     }
-
-    fn load_catalog(&self, driver: Driver) -> bool {
-        self.catalogs.spawn_once(driver, load_catalog)
-    }
-}
-
-async fn load_catalog(driver: Driver) -> Result<Catalog, Error> {
-    // fetch the catalog for this driver
+    None
 }
 ```
 
-`spawn_once` takes the key and passes it to the request function. Switching a page to another key reads that key's snapshot instead of replacing the previous result.
+`poll` is not a frame tick and is not called for key-driven changes. Keep it
+cheap and idempotent. Only the active page is polled; paused pages should catch
+up in `resume`.
 
-Call `remove` or `clear` when a key should be dropped early; both cancel in-flight requests. `get_or_create` and `spawn_once` count as use and refresh LRU recency. `snapshot` is a cheap read that returns `None` for keys that were never requested and does not change recency, so rendering does not keep keys alive. For several parameters, use a tuple or a struct as the key.
+## Navigation and modals
 
-Reading a snapshot stays explicit:
-
-```rust
-match &*ctx.catalog().snapshot() {
-    Snapshot::Idle => {}
-    Snapshot::Loading { previous } => {}
-    Snapshot::Ready(catalog) => {}
-    Snapshot::Error { error, previous } => {}
-    Snapshot::Cancelled { previous } => {}
-}
-```
-
-When a page renders stale data and errors together, flatten the snapshot first. `view()` keeps the error visible even when `data` comes from the previous result:
-
-```rust
-let snapshot = ctx.catalog().snapshot();
-let view = snapshot.view();
-
-if let Some(catalog) = view.data {
-    draw_catalog(catalog, frame, area);
-}
-if let Some(error) = view.error {
-    draw_error(error, frame, area);
-}
-```
-
-> [!TIP]
-> Share one `Redraw` between all tasks in an application. Triggers that happen before the next frame collapse into one repaint.
-
-## Declarative input and navigation
-
-Bind each key next to its hint:
-
-```rust
-keys.bind_with_hint(
-    KeyChord::char('r'),
-    Action::Reload,
-    KeyHint::new("r", "reload"),
-);
-keys.bind_with_hint(
-    KeyChord::char('d'),
-    Action::Details,
-    KeyHint::new("d", "details"),
-);
-```
-
-`App` draws page hints and global hints on one footer line, so pages do not repeat framework or application shortcuts on every screen.
-Use `App::set_hint_renderer` to replace the footer layout or styling; `hint_line` exposes the default spans.
-
-Global bindings are reserved chords. `App` resolves them before dispatching to the
-page, so a page that returns `PageEvent::Handled` cannot shadow a global shortcut.
-If a page needs a chord, do not register it globally.
-
-Navigation is returned from the page: `PageEvent::Navigate` takes `NavAction::Push`,
-`Pop`, `Replace`, or `Reset`. The navigator applies the action right away: it
-pauses and disposes the old page, then initializes and resumes the new one.
-
-### Nested navigation
-
-`Page`, `Router`, and `Navigator` are parameterized by route type. A shell page
-can therefore own a section-local navigator instead of re-implementing a
-`Screen`/`Mode` enum inside `on_key`:
-
-```rust
-enum AccountRoute {
-    List,
-    Skins(u64),
-}
-
-struct AccountRouter;
-
-impl Router<Services, AccountRoute> for AccountRouter {
-    fn create(
-        &mut self,
-        route: &AccountRoute,
-        ctx: &Services,
-    ) -> Box<dyn Page<Services, AccountRoute>> {
-        match route {
-            AccountRoute::List => Box::new(AccountListPage::new()),
-            AccountRoute::Skins(id) => Box::new(ModalPage::new(SkinsPage::new(*id, ctx))),
-        }
-    }
-}
-
-struct AccountsShell {
-    nav: Navigator<Services, AccountRoute, AccountRouter>,
-}
-```
-
-Delegate keys, hints, rendering, and lifecycle with one-line helpers on
-`Navigator`:
-
-```rust
-if self.nav.handle_key(ctx, key) {
-    return PageEvent::Handled;
-}
-```
-
-`nav.render(ctx, frame, area)`, `nav.keybindings()`, `nav.resume_current(ctx)`,
-`nav.pause_current(ctx)`, and `nav.dispose_all(ctx)` forward the remaining
-`Page` hooks. When the nested stack is at its root and returns `Ignored` for
-`Esc`, `handle_key` returns `false` so the outer shell can take over (for
-example, to move focus back to a sidebar).
-
-### Callback-driven modals
-
-`ModalHost<C, S, R>` owns the active modal stack and stores each completion
-callback when the modal is opened. Wrap a page in `ModalPage::new(...)` and
-implement `WithModal<C, R>` so the page struct does not even need a `modals`
-field or separate `State` struct—completion callbacks receive `&mut Self`
-directly and can return `()`, `NavAction<R>`, or `PageEvent<R>`:
-
-```rust
-struct SkinsPage {
-    account_id: u64,
-    keys: KeyMap<Action>,
-}
-
-impl SkinsPage {
-    fn open_import(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
-        modals.open(FilePicker::png(), |page, _ctx, modals, path| {
-            modals.open(TextPrompt::new("name", default_name(&path)), move |page, ctx, _, name| {
-                ctx.skins().import(page.account_id, name, path);
-            });
-        });
-    }
-
-    fn confirm_delete_account(&mut self, modals: &mut ModalHost<Services, Self, AccountRoute>) {
-        modals.open(Confirm::new("Delete account?"), |page, ctx, _, ()| {
-            ctx.accounts().remove(page.account_id);
-            NavAction::Pop
-        });
-    }
-}
-```
-
-`Modal::on_key` returns `ModalOutcome::Completed(value)` to run the callback,
-`Cancelled` to close without it, `Handled` to consume a key, or `Ignored` to let
-the page handle that key. `ModalPage` automatically routes keys to the top
-modal first, renders active modals above the page, and replaces page key hints
-with the top modal's hints while any modal is open. Pages that prefer manual
-control can embed `ModalHost` directly and call `modals.dispatch_key(&mut state, ctx, key)`.
-
-## Compared with the official async action flow
-
-The [`async-github`](https://github.com/ratatui/ratatui/tree/main/examples/apps/async-github)
-example keeps widget state in `Arc<RwLock<_>>` and repaints at a fixed 60 FPS.
-The [async template](https://github.com/ratatui/ratatui-website/tree/main/code/templates/components_async)
-routes input, ticks, and background results through one
-`mpsc::unbounded_channel::<Action>()` and a central `match`.
-
-`ratail` replaces that bus with typed handles and direct page output: shared
-async data is a `Task` owned by a service in `Context`, pages return `PageEvent`,
-and `Redraw` wakes the loop only when a snapshot changes.
-
-| Concern | Official action-channel flow | ratail |
-| --- | --- | --- |
-| Message transport | One unbounded `Action` channel | Typed `Task` handles plus direct `PageEvent` returns |
-| Dispatch | Central `match action` in the app | Page-local action match; no app-wide enum |
-| Background result | Producer sends `Action::...` | Task updates its own snapshot |
-| Cross-page data | Payloads and component state | Store the `Task` in `Context` |
-| Loading/error | Hand-written state variants | Built into `Snapshot`, with the previous value retained |
-| Repaint | Tick/frame rate | `Redraw` wakes the loop only when a snapshot changes |
-| Navigation | Another `Action` variant | `PageEvent::Navigate` |
-| Input | Keybinding, then `Action`, then channel | `KeyMap`, then `PageEvent`; global keys are closures |
-| Hints | Keybinding config or manual strings | Framework merges page and global hints into a footer |
-| Policy | Template defines `Quit`, `Tick`, and other actions | No built-in quit key, action enum, or frame interval |
-
-The trade-off is deliberate: an action channel is a general pub/sub bus, while
-`ratail` treats shared state as a typed service and page output as an intent.
-You lose the general bus and central dispatcher, and implement `Context`,
-`Page`, and `Router` yourself.
+- A page returns `PageEvent::Navigate(NavAction::...)`; `Navigator` applies it and runs page lifecycle hooks.
+- Removing a page with `Pop`, `Replace`, or `Reset` drops its local state; put retained state in a service.
+- A shell page can own a nested `Navigator` to keep section routes independent.
+- `ModalHost` stores modals plus completion callbacks; `ModalPage` forwards keys, rendering, hints, and `poll`.
+- A modal completion callback can mutate the page or return a `NavAction`.
 
 ## Example
-
-The catalog example runs the whole flow:
 
 ```bash
 cargo run --example catalog
 ```
 
-It has two routes reading the same `Task`. Pressing `r` on either page starts one shared request, and both pages render the same result. The third request fails on purpose so you can see error rendering with the previous data still on screen. `d` opens details, `Backspace` goes back, and `Ctrl+Q` is registered by the app.
+The example has two routes sharing one `Task`: `r` starts a request, `d` opens
+details, `Backspace` goes back, and `Ctrl+Q` exits.
 
 ## Limitations
 
-- `App::run` is async and lives on a single tokio task. Pages and rendering are synchronous, so `Page::on_key` cannot await. Service types must be `Send + Sync` because `Task` spawns work.
-- `App` sends `Event::Key` to pages. Resize triggers a repaint, but mouse, paste, and focus events never reach a page.
-- A `Task` stores one snapshot and `spawn_once` skips while a run is in flight. There are no progress streams, retries, backoff, or multi-consumer queues.
-- `Task::new()` does not wake the UI; use `Task::with_redraw`. Animations need their own timer task calling `Redraw::trigger`.
-- The navigator keeps routes in a `Vec`. Nothing is persisted, deep links are not restored, and route parameters are not serialized.
+- Pages and rendering are synchronous; `Page::on_key` cannot await.
+- Only `Event::Key` reaches pages; mouse, paste, and focus events are not dispatched.
+- A `Task` keeps the latest snapshot only; there are no progress streams, retries, backoff, or multi-consumer queues.
+- `Task::new()` does not wake the UI; use `Task::with_redraw` when automatic repaints are needed.
+- Routes live in an in-memory `Vec`; there is no persistence, deep-link restore, or parameter serialization.

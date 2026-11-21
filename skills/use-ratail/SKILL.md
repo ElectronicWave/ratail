@@ -153,6 +153,26 @@ fn keybindings(&self, route: &Route) -> Vec<KeyHint> {
 - Render hints with `keybindings(route)`. `App` merges page hints and global hints into one footer line. With no hints, the page gets the full frame area.
 - Replace the footer with `App::set_hint_renderer` when the app needs custom layout or styling; `hint_line` exposes the default spans.
 
+`Page::poll` runs after a `Redraw` request and before the next frame. Use it for
+async completion effects, not for a frame tick:
+
+```rust
+fn poll(&mut self, ctx: &Services, _route: &Route) -> Option<NavAction<Route>> {
+    if self.waiting && ctx.catalog().snapshot().value().is_some() {
+        self.waiting = false;
+        return Some(NavAction::Push(Route::Details));
+    }
+    None
+}
+```
+
+- `poll` is not called for key-driven changes.
+- Keep it cheap and idempotent; guard follow-up work with page state or a snapshot check.
+- Return `Some(NavAction)` to navigate, or `None` to stay put.
+- Each redraw polls the active page once and applies at most one navigation action. A newly pushed page is not polled again in the same redraw; use its `init`/`resume` hooks or wait for the next redraw.
+- Do not request a redraw unconditionally from `poll`; start work that will request one when it completes.
+- Only the active page is polled. Paused pages catch up in `resume` or when they become active again.
+
 `Page` and `Router` are generic over the route type and default to
 `C::Route`. A page that belongs to a section can use a section-local route:
 
@@ -220,10 +240,11 @@ if self.nav.handle_key(ctx, key) {
 ```
 
 Use `self.nav.render(ctx, frame, area)`, `self.nav.keybindings()`,
-`self.nav.resume_current(ctx)`, `self.nav.pause_current(ctx)`, and
-`self.nav.dispose_all(ctx)` in the outer shell's `Page` implementation. Return
-`Ignored` from the sub-page when it is at its root and wants the outer shell to
-handle the key, such as `Esc` moving focus back to a sidebar.
+`self.nav.poll_current(ctx)`, `self.nav.resume_current(ctx)`,
+`self.nav.pause_current(ctx)`, and `self.nav.dispose_all(ctx)` in the outer
+shell's `Page` implementation. Return `Ignored` from the sub-page when it is at
+its root and wants the outer shell to handle the key, such as `Esc` moving focus
+back to a sidebar.
 
 ## Callback-driven modals
 
@@ -260,11 +281,12 @@ impl SkinsPage {
 `Ignored` to let the page handle it. Completion callbacks can return `()`,
 `NavAction<R>`, or `PageEvent<R>`. If a page embeds `ModalHost` manually instead
 of using `ModalPage`, call `modals.dispatch_key(&mut state, ctx, key)` at the
-top of `on_key`.
+top of `on_key`. `Modal::poll` defaults to ignoring polls; override it when the
+modal owns async work, and `ModalPage` will poll the top modal before the page.
 
 ## Runtime behavior
 
-- `App::run` draws first, then waits for a terminal event or `Redraw::requested()`.
+- `App::run` draws first, then waits for a terminal event or `Redraw::requested()`. A redraw polls the active page before the next draw.
 - Only `Event::Key` is routed to pages. Resize causes another draw, but mouse, paste, and focus events do not reach pages.
 - Pages and rendering are synchronous, so `Page::on_key` cannot await. Spawn work through a `Task`.
 - For animation or timers, run a task that calls `Redraw::trigger`. There is no configured frame interval.
@@ -279,5 +301,7 @@ top of `on_key`.
 - Adding a global `Action` channel instead of using `Task` and `PageEvent`.
 - Letting `Services` grow into a bag of unrelated tasks; move each one into the domain service that owns the request.
 - Hand-maintaining a `Screen`/`Mode` enum when a nested `Navigator` can own the section's route stack.
+- Putting async completion logic in `render` or in a service; move it to `Page::poll`.
+- Calling `Redraw::trigger` unconditionally from `poll`, which creates a busy loop.
 - Storing popups as `Option` fields and matching `PopupEvent` in `on_key`; open them through `ModalHost` and put the follow-up in the completion callback.
 - Wrapping a modal-heavy page manually instead of using `ModalPage<C, P, R>` (`WithModal`), or forgetting that a modal completion callback can return `NavAction<R>` directly.

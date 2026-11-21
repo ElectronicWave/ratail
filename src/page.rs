@@ -32,6 +32,23 @@ pub trait Page<C: Context, R = <C as Context>::Route> {
         PageEvent::Ignored
     }
 
+    /// Runs after a redraw is requested and before the next frame.
+    ///
+    /// This is the place to react to external state changes such as a
+    /// completed [`Task`](crate::Task). The hook is not called for key-driven
+    /// changes and is not a frame tick; it runs only when
+    /// [`Redraw`](crate::Redraw) reports that something may have changed.
+    ///
+    /// Polling must be cheap and idempotent. Return a navigation action when
+    /// the page should move; the navigator applies at most one action per
+    /// redraw. A newly pushed page initializes and resumes after that action,
+    /// but it is not polled again until the next redraw. Do not request a
+    /// redraw unconditionally; start work that will request one when it
+    /// completes.
+    fn poll(&mut self, _ctx: &C, _route: &R) -> Option<NavAction<R>> {
+        None
+    }
+
     /// Hints for the current page. This is called on every frame, so pages can
     /// regenerate localized hints when the active locale changes.
     fn keybindings(&self, _route: &R) -> Vec<KeyHint> {
