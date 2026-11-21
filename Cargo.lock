@@ -350,6 +350,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83be4da409554841af087163ad187608824ad8ca8713d8e124c8e0f704a2f92f"
+
+[[package]]
 name = "mio"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -484,7 +490,7 @@ dependencies = [
  "arc-swap",
  "crossterm",
  "futures-core",
- "lru",
+ "lru 0.19.1",
  "ratatui",
  "tokio",
 ]
@@ -514,7 +520,7 @@ dependencies = [
  "hashbrown",
  "itertools",
  "kasuari",
- "lru",
+ "lru 0.18.5",
  "palette",
  "serde",
  "strum",
