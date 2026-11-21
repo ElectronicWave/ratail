@@ -205,5 +205,6 @@ async fn main() -> std::io::Result<()> {
 - Global key that mutates services: use `App::bind_global` with a closure over `&mut C`; return `AppFlow::Exit` only when the app should stop.
 - Custom footer: call `App::set_hint_renderer` and draw any widget in the footer area; `hint_line` builds the default spans.
 - Error with stale data: render `snapshot.error()` and `snapshot.previous()` together instead of clearing the screen.
-- Nested section: give the shell a `Navigator<Services, SectionRoute, SectionRouter>` and delegate with `nav.handle_key(ctx, key)`, `nav.render(ctx, frame, area)`, `nav.keybindings()`, and `nav.dispose_all(ctx)`.
+- Async follow-up: implement `Page::poll`; it runs after a redraw and before the next frame, and can return one `NavAction` or start page-owned work. Keep it cheap and idempotent; a page pushed by that action is not polled again in the same redraw.
+- Nested section: give the shell a `Navigator<Services, SectionRoute, SectionRouter>` and delegate with `nav.handle_key(ctx, key)`, `nav.render(ctx, frame, area)`, `nav.keybindings()`, `nav.poll_current(ctx)`, and `nav.dispose_all(ctx)`.
 - Modal flow: implement `WithModal<Services, Route>` and wrap the page in `ModalPage::new(page)` so callbacks receive `&mut Self` and can chain modals or return `NavAction` without splitting page state.

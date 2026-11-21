@@ -7,7 +7,9 @@
 //!   application repaints when the snapshot changes.
 //! - [`Page`] owns route-local state and behavior. Its route type defaults to
 //!   [`Context::Route`], but a shell page can embed an [`Navigator`] for a
-//!   section-local route type.
+//!   section-local route type. After a [`Redraw`] request, the active page's
+//!   `poll` hook runs before the next frame so pages can react to completed
+//!   tasks without doing work in `render`.
 //! - [`Navigator`] owns a route stack and page lifecycle.
 //! - [`ModalHost`] owns a callback-driven modal stack for prompts, pickers, and
 //!   confirmations.

@@ -95,7 +95,8 @@ impl<C: Context, R: Router<C>> App<C, R> {
     /// Runs the application on the current tokio runtime.
     ///
     /// The loop wakes on terminal events and on task repaint signals, so there
-    /// is no frame interval to tune.
+    /// is no frame interval to tune. A repaint signal polls the current page
+    /// before the next frame.
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         let mut events = EventStream::new();
 
@@ -104,6 +105,7 @@ impl<C: Context, R: Router<C>> App<C, R> {
 
             let redraw = self.context.redraw().clone();
             tokio::select! {
+                biased;
                 event = poll_fn(|cx| std::pin::Pin::new(&mut events).poll_next(cx)) => {
                     match event {
                         Some(Ok(Event::Key(key))) => {
@@ -116,7 +118,9 @@ impl<C: Context, R: Router<C>> App<C, R> {
                         None => break,
                     }
                 }
-                _ = redraw.requested() => {}
+                _ = redraw.requested() => {
+                    self.navigator.poll_current(&self.context);
+                }
             }
         }
 

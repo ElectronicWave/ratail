@@ -50,14 +50,25 @@ impl<C: Context, R, Rt: Router<C, R>> Navigator<C, R, Rt> {
         }
     }
 
-    pub fn apply(&mut self, action: NavAction<R>, ctx: &C) {
+    /// Applies a navigation action.
+    ///
+    /// Returns `false` when the action did not change the stack, such as a
+    /// [`NavAction::Pop`] on the root page.
+    pub fn apply(&mut self, action: NavAction<R>, ctx: &C) -> bool {
         match action {
-            NavAction::Push(route) => self.push(route, ctx),
-            NavAction::Pop => {
-                self.pop(ctx);
+            NavAction::Push(route) => {
+                self.push(route, ctx);
+                true
             }
-            NavAction::Replace(route) => self.replace(route, ctx),
-            NavAction::Reset(route) => self.reset(route, ctx),
+            NavAction::Pop => self.pop(ctx),
+            NavAction::Replace(route) => {
+                self.replace(route, ctx);
+                true
+            }
+            NavAction::Reset(route) => {
+                self.reset(route, ctx);
+                true
+            }
         }
     }
 
@@ -165,6 +176,27 @@ impl<C: Context, R, Rt: Router<C, R>> Navigator<C, R, Rt> {
                 true
             }
         }
+    }
+
+    /// Polls the current page once and applies at most one navigation action.
+    ///
+    /// Only the top page is polled. A paused page observes completed work when
+    /// it is resumed or when it becomes the top page again.
+    ///
+    /// A page pushed by the navigation action is initialized and resumed before
+    /// this method returns, but it is not polled again until the next redraw.
+    ///
+    /// Returns `true` when the navigation action changed the stack.
+    pub fn poll_current(&mut self, ctx: &C) -> bool {
+        let action = match self.current_mut() {
+            Some((route, page)) => page.poll(ctx, route),
+            None => None,
+        };
+        let Some(action) = action else {
+            return false;
+        };
+
+        self.apply(action, ctx)
     }
 
     /// Renders the current page into `area`.
