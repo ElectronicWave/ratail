@@ -1,12 +1,11 @@
 use ratatui::Frame;
-use ratatui::crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 
 use crate::context::Context;
-use crate::input::KeyHint;
+use crate::input::{InputEvent, KeyHint};
 use crate::navigator::NavAction;
 
-/// What a page wants the application to do after handling a key.
+/// What a page wants the application to do after handling an input event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PageEvent<R> {
     Ignored,
@@ -28,7 +27,7 @@ pub trait Page<C: Context, R = <C as Context>::Route> {
 
     fn dispose(&mut self, _ctx: &C, _route: &R) {}
 
-    fn on_key(&mut self, _ctx: &C, _route: &R, _key: KeyEvent) -> PageEvent<R> {
+    fn on_input(&mut self, _ctx: &C, _route: &R, _input: InputEvent) -> PageEvent<R> {
         PageEvent::Ignored
     }
 

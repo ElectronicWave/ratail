@@ -19,14 +19,14 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 ## 架构
 
 ```text
-terminal key ─┐
-              ├─> App::run ─> Navigator ─> current Page
-Redraw ───────┘                 └─ on_key / poll / render
+terminal input ─┐
+                ├─> App::run ─> Navigator ─> current Page
+Redraw ─────────┘                 └─ on_input / poll / render
 
 Task completes -> update snapshot -> Redraw.trigger()
 ```
 
-`App::run` 只有两个唤醒源：终端事件和 `Redraw`。按键交给当前页面的 `on_key`；异步状态变化交给 `poll`。每次 redraw 最多 poll 当前页面一次，并最多应用一个 `NavAction`。
+`App::run` 只有两个唤醒源：终端事件和 `Redraw`。归一化后的按键、body 区域内的鼠标事件（通过 `App::enable_mouse` 开启捕获）以及粘贴事件统一交给当前页面的 `on_input`；异步状态变化交给 `poll`。每次 redraw 最多 poll 当前页面一次，并最多应用一个 `NavAction`。
 
 状态放在哪里：
 
@@ -75,9 +75,9 @@ impl Page<Services> for Home {
         ctx.reload();
     }
 
-    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
-        match key.code {
-            KeyCode::Char('r') => {
+    fn on_input(&mut self, ctx: &Services, _route: &Route, input: InputEvent) -> PageEvent<Route> {
+        match input {
+            InputEvent::Key(key) if key == KeyChord::char('r') => {
                 ctx.reload();
                 PageEvent::Handled
             }
@@ -171,8 +171,8 @@ cargo run --example catalog
 
 ## 限制
 
-- 页面和渲染是同步的，`Page::on_key` 不能 `await`。
-- 只把 `Event::Key` 交给页面；鼠标、粘贴和焦点事件不会分发。
+- 页面和渲染是同步的，`Page::on_input` 不能 `await`。
+- `Event::Key`、`Event::Mouse`（通过 `App::enable_mouse` 开启终端鼠标捕获）与 `Event::Paste` 会归一化为 `InputEvent` 分发给页面；焦点事件不会分发。
 - `Task` 只保留最新快照，没有进度流、重试、退避或多消费者队列。
 - `Task::new()` 不会唤醒 UI；需要自动重绘时使用 `Task::with_redraw`。
 - 路由只存在内存中的 `Vec` 里，没有持久化、深链接恢复或参数序列化。

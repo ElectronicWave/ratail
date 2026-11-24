@@ -13,7 +13,7 @@
 //! - [`Navigator`] owns a route stack and page lifecycle.
 //! - [`ModalHost`] owns a callback-driven modal stack for prompts, pickers, and
 //!   confirmations.
-//! - [`App`] drives rendering and key routing on the current tokio runtime.
+//! - [`App`] drives rendering and input routing on the current tokio runtime.
 //!
 //! [`Task`] and [`App::run`] require a tokio runtime; pages themselves are
 //! synchronous.
@@ -30,7 +30,9 @@ pub mod task_cache;
 
 pub use app::{App, AppFlow, hint_line};
 pub use context::Context;
-pub use input::{FocusRing, KeyChord, KeyHint, KeyMap};
+pub use input::{
+    FocusRing, Hit, HitMap, InputEvent, KeyChord, KeyHint, KeyMap, MouseInput, MouseKind,
+};
 pub use modal::{IntoPageEvent, Modal, ModalHost, ModalOutcome, ModalPage, WithModal};
 pub use navigator::{NavAction, Navigator, Router};
 pub use page::{Page, PageEvent};

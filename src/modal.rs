@@ -1,20 +1,19 @@
 use std::marker::PhantomData;
 
 use ratatui::Frame;
-use ratatui::crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 
 use crate::context::Context;
-use crate::input::KeyHint;
+use crate::input::{InputEvent, KeyHint};
 use crate::navigator::NavAction;
 use crate::page::{Page, PageEvent};
 
-/// What a modal wants after handling a key.
+/// What a modal wants after handling an input event or poll.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModalOutcome<T> {
-    /// The modal did not consume the key.
+    /// The modal did not consume the event.
     Ignored,
-    /// The modal consumed the key and stays open.
+    /// The modal consumed the event and stays open.
     Handled,
     /// The modal was cancelled. It is popped without running its completion
     /// callback.
@@ -31,7 +30,7 @@ pub enum ModalOutcome<T> {
 pub trait Modal<C: Context> {
     type Value;
 
-    fn on_key(&mut self, ctx: &C, key: KeyEvent) -> ModalOutcome<Self::Value>;
+    fn on_input(&mut self, ctx: &C, input: InputEvent) -> ModalOutcome<Self::Value>;
 
     /// Runs after a redraw when the modal may own async work.
     ///
@@ -129,16 +128,21 @@ impl<C: Context, S: 'static, R: 'static> ModalHost<C, S, R> {
         self.stack.len()
     }
 
-    /// Routes a key to the top modal and returns the resulting [`PageEvent`].
+    /// Routes an input event to the top modal and returns the resulting
+    /// [`PageEvent`].
     ///
     /// Returns `None` when no modal is open or the top modal returned
     /// [`ModalOutcome::Ignored`]. When a modal completes, it is popped and its
     /// callback's [`IntoPageEvent`] result (defaulting to
     /// [`PageEvent::Handled`] for `()`) is returned.
-    pub fn dispatch_key(&mut self, state: &mut S, ctx: &C, key: KeyEvent) -> Option<PageEvent<R>> {
-        let modal = self.stack.last_mut()?;
-
-        match modal.on_key(ctx, key) {
+    pub fn dispatch_input(
+        &mut self,
+        state: &mut S,
+        ctx: &C,
+        input: InputEvent,
+    ) -> Option<PageEvent<R>> {
+        let flow = self.stack.last_mut()?.on_input(ctx, input);
+        match flow {
             EntryFlow::Ignored => None,
             EntryFlow::Handled => Some(PageEvent::Handled),
             EntryFlow::Cancelled => {
@@ -155,14 +159,14 @@ impl<C: Context, S: 'static, R: 'static> ModalHost<C, S, R> {
         }
     }
 
-    /// Routes a key to the top modal.
+    /// Routes an input event to the top modal.
     ///
-    /// Returns `true` when the modal consumed the key. A completed modal is
+    /// Returns `true` when the modal consumed the event. A completed modal is
     /// popped and its callback runs before this method returns; a cancelled
-    /// modal is popped without calling its callback. `false` means the key was
-    /// ignored, so the page may handle it.
-    pub fn on_key(&mut self, state: &mut S, ctx: &C, key: KeyEvent) -> bool {
-        self.dispatch_key(state, ctx, key).is_some()
+    /// modal is popped without calling its callback. `false` means the event
+    /// was ignored.
+    pub fn on_input(&mut self, state: &mut S, ctx: &C, input: InputEvent) -> bool {
+        self.dispatch_input(state, ctx, input).is_some()
     }
 
     /// Polls the top modal.
@@ -230,12 +234,12 @@ pub trait WithModal<C: Context, R = <C as Context>::Route>: Sized + 'static {
 
     fn dispose(&mut self, _ctx: &C, _route: &R, _modals: &mut ModalHost<C, Self, R>) {}
 
-    fn on_key(
+    fn on_input(
         &mut self,
         _ctx: &C,
         _route: &R,
         _modals: &mut ModalHost<C, Self, R>,
-        _key: KeyEvent,
+        _input: InputEvent,
     ) -> PageEvent<R> {
         PageEvent::Ignored
     }
@@ -307,11 +311,14 @@ impl<C: Context, P: WithModal<C, R>, R: 'static> Page<C, R> for ModalPage<C, P, 
         self.page.dispose(ctx, route, &mut self.modals);
     }
 
-    fn on_key(&mut self, ctx: &C, route: &R, key: KeyEvent) -> PageEvent<R> {
-        if let Some(event) = self.modals.dispatch_key(&mut self.page, ctx, key) {
-            return event;
+    fn on_input(&mut self, ctx: &C, route: &R, input: InputEvent) -> PageEvent<R> {
+        if self.modals.is_active() {
+            return self
+                .modals
+                .dispatch_input(&mut self.page, ctx, input)
+                .unwrap_or(PageEvent::Ignored);
         }
-        self.page.on_key(ctx, route, &mut self.modals, key)
+        self.page.on_input(ctx, route, &mut self.modals, input)
     }
 
     fn poll(&mut self, ctx: &C, route: &R) -> Option<NavAction<R>> {
@@ -342,7 +349,7 @@ enum EntryFlow {
 }
 
 trait ModalEntry<C: Context, S, R> {
-    fn on_key(&mut self, ctx: &C, key: KeyEvent) -> EntryFlow;
+    fn on_input(&mut self, ctx: &C, input: InputEvent) -> EntryFlow;
     fn poll(&mut self, ctx: &C) -> EntryFlow;
     fn complete(&mut self, state: &mut S, ctx: &C, host: &mut ModalHost<C, S, R>) -> PageEvent<R>;
     fn render(&mut self, ctx: &C, frame: &mut Frame, area: Rect);
@@ -362,28 +369,14 @@ where
     F: FnOnce(&mut S, &C, &mut ModalHost<C, S, R>, M::Value) -> Out,
     Out: IntoPageEvent<R>,
 {
-    fn on_key(&mut self, ctx: &C, key: KeyEvent) -> EntryFlow {
-        match self.modal.on_key(ctx, key) {
-            ModalOutcome::Ignored => EntryFlow::Ignored,
-            ModalOutcome::Handled => EntryFlow::Handled,
-            ModalOutcome::Cancelled => EntryFlow::Cancelled,
-            ModalOutcome::Completed(value) => {
-                self.value = Some(value);
-                EntryFlow::Completed
-            }
-        }
+    fn on_input(&mut self, ctx: &C, input: InputEvent) -> EntryFlow {
+        let outcome = self.modal.on_input(ctx, input);
+        into_entry_flow(&mut self.value, outcome)
     }
 
     fn poll(&mut self, ctx: &C) -> EntryFlow {
-        match self.modal.poll(ctx) {
-            ModalOutcome::Ignored => EntryFlow::Ignored,
-            ModalOutcome::Handled => EntryFlow::Handled,
-            ModalOutcome::Cancelled => EntryFlow::Cancelled,
-            ModalOutcome::Completed(value) => {
-                self.value = Some(value);
-                EntryFlow::Completed
-            }
-        }
+        let outcome = self.modal.poll(ctx);
+        into_entry_flow(&mut self.value, outcome)
     }
 
     fn complete(&mut self, state: &mut S, ctx: &C, host: &mut ModalHost<C, S, R>) -> PageEvent<R> {
@@ -404,5 +397,17 @@ where
 
     fn keybindings(&self) -> Vec<KeyHint> {
         self.modal.keybindings()
+    }
+}
+
+fn into_entry_flow<T>(slot: &mut Option<T>, outcome: ModalOutcome<T>) -> EntryFlow {
+    match outcome {
+        ModalOutcome::Ignored => EntryFlow::Ignored,
+        ModalOutcome::Handled => EntryFlow::Handled,
+        ModalOutcome::Cancelled => EntryFlow::Cancelled,
+        ModalOutcome::Completed(value) => {
+            *slot = Some(value);
+            EntryFlow::Completed
+        }
     }
 }

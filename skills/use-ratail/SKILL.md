@@ -120,8 +120,8 @@ match &*ctx.catalog().snapshot() {
 Every `Page` method receives the route that owns the page:
 
 ```rust
-fn on_key(&mut self, ctx: &Services, route: &Route, key: KeyEvent) -> PageEvent<Route> {
-    match self.keys.action_for(&key) {
+fn on_input(&mut self, ctx: &Services, route: &Route, input: InputEvent) -> PageEvent<Route> {
+    match self.keys.action_for(&input) {
         Some(HomeAction::Reload) => {
             ctx.catalog().reload();
             PageEvent::Handled
@@ -287,8 +287,10 @@ modal owns async work, and `ModalPage` will poll the top modal before the page.
 ## Runtime behavior
 
 - `App::run` draws first, then waits for a terminal event or `Redraw::requested()`. A redraw polls the active page before the next draw.
-- Only `Event::Key` is routed to pages. Resize causes another draw, but mouse, paste, and focus events do not reach pages.
-- Pages and rendering are synchronous, so `Page::on_key` cannot await. Spawn work through a `Task`.
+- `Event::Key`, `Event::Mouse` (inside the body area; call `App::enable_mouse` for capture), and `Event::Paste` are normalized into `InputEvent` and routed through `Page::on_input` / `Navigator::handle_input` / `Modal::on_input`. `App` filters key releases and pointer motion noise and tracks double clicks globally.
+- For immediate-mode hit testing, store a `HitMap<T>` (cleared and populated in `render`, queried in `on_input` with `hit_mouse` / `hit_mouse_copied`).
+- `ModalPage` blocks all input from reaching the underlying page whenever a modal is active.
+- Pages and rendering are synchronous, so `Page::on_input` cannot await. Spawn work through a `Task`.
 - For animation or timers, run a task that calls `Redraw::trigger`. There is no configured frame interval.
 
 ## Common mistakes

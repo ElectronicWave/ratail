@@ -22,16 +22,18 @@ tokio = { version = "1", features = ["macros", "rt", "time"] }
 ## Architecture
 
 ```text
-terminal key ─┐
-              ├─> App::run ─> Navigator ─> active Page
-Redraw ───────┘                 └─ on_key / poll / render
+terminal input ─┐
+                ├─> App::run ─> Navigator ─> active Page
+Redraw ─────────┘                 └─ on_input / poll / render
 
 Task completes -> update snapshot -> Redraw.trigger()
 ```
 
-`App::run` has two wake sources: terminal events and `Redraw`. Keys go to the
-active page's `on_key`; async state changes go to `poll`. Each redraw polls the
-active page at most once and applies at most one `NavAction`.
+`App::run` has two wake sources: terminal events and `Redraw`. Normalized keys,
+mouse events inside the body (enable capture with `App::enable_mouse`), and
+pastes go to the active page's `on_input`; async state changes go to `poll`.
+Each redraw polls the active page at most once and applies at most one
+`NavAction`.
 
 Where state lives:
 
@@ -82,9 +84,9 @@ impl Page<Services> for Home {
         ctx.reload();
     }
 
-    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
-        match key.code {
-            KeyCode::Char('r') => {
+    fn on_input(&mut self, ctx: &Services, _route: &Route, input: InputEvent) -> PageEvent<Route> {
+        match input {
+            InputEvent::Key(key) if key == KeyChord::char('r') => {
                 ctx.reload();
                 PageEvent::Handled
             }
@@ -186,8 +188,8 @@ details, `Backspace` goes back, and `Ctrl+Q` exits.
 
 ## Limitations
 
-- Pages and rendering are synchronous; `Page::on_key` cannot await.
-- Only `Event::Key` reaches pages; mouse, paste, and focus events are not dispatched.
+- Pages and rendering are synchronous; `Page::on_input` cannot await.
+- `Event::Key`, `Event::Mouse` (when `App::enable_mouse` is called), and `Event::Paste` reach pages as normalized `InputEvent` values; focus events are not dispatched.
 - A `Task` keeps the latest snapshot only; there are no progress streams, retries, backoff, or multi-consumer queues.
 - `Task::new()` does not wake the UI; use `Task::with_redraw` when automatic repaints are needed.
 - Routes live in an in-memory `Vec`; there is no persistence, deep-link restore, or parameter serialization.

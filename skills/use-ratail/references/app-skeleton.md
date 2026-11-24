@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ratail::{
-    App, AppFlow, Context, KeyChord, KeyHint, KeyMap, NavAction, Page, PageEvent, Redraw, Router,
-    Snapshot, Task,
+    App, AppFlow, Context, InputEvent, KeyChord, KeyHint, KeyMap, NavAction, Page, PageEvent,
+    Redraw, Router, Snapshot, Task,
 };
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
 
@@ -137,8 +137,8 @@ impl Page<Services> for HomePage {
         self.keys.hints().to_vec()
     }
 
-    fn on_key(&mut self, ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
-        match self.keys.action_for(&key) {
+    fn on_input(&mut self, ctx: &Services, _route: &Route, input: InputEvent) -> PageEvent<Route> {
+        match self.keys.action_for(&input) {
             Some(HomeAction::Reload) => {
                 ctx.items().reload();
                 PageEvent::Handled
@@ -168,8 +168,8 @@ impl Page<Services> for DetailsPage {
         Vec::new()
     }
 
-    fn on_key(&mut self, _ctx: &Services, _route: &Route, key: KeyEvent) -> PageEvent<Route> {
-        if key.code == KeyCode::Backspace {
+    fn on_input(&mut self, _ctx: &Services, _route: &Route, input: InputEvent) -> PageEvent<Route> {
+        if input == InputEvent::Key(KeyChord::plain(KeyCode::Backspace)) {
             PageEvent::Navigate(NavAction::Pop)
         } else {
             PageEvent::Ignored

@@ -9,11 +9,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ratail::{
-    App, AppFlow, Context, KeyChord, KeyHint, KeyMap, NavAction, Page, PageEvent, Redraw, Router,
-    Snapshot, Task,
+    App, AppFlow, Context, InputEvent, KeyChord, KeyHint, KeyMap, NavAction, Page, PageEvent,
+    Redraw, Router, Snapshot, Task,
 };
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -176,8 +176,8 @@ impl Page<Services> for CatalogPage {
         }
     }
 
-    fn on_key(&mut self, ctx: &Services, route: &Route, key: KeyEvent) -> PageEvent<Route> {
-        match self.keys.action_for(&key) {
+    fn on_input(&mut self, ctx: &Services, route: &Route, input: InputEvent) -> PageEvent<Route> {
+        match self.keys.action_for(&input) {
             Some(Action::Reload) => {
                 ctx.catalog().reload();
                 PageEvent::Handled

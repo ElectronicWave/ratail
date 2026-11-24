@@ -1,9 +1,8 @@
 use ratatui::Frame;
-use ratatui::crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 
 use crate::context::Context;
-use crate::input::KeyHint;
+use crate::input::{InputEvent, KeyHint};
 use crate::page::{Page, PageEvent};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -156,17 +155,17 @@ impl<C: Context, R, Rt: Router<C, R>> Navigator<C, R, Rt> {
         self.stack.is_empty()
     }
 
-    /// Forwards a key to the current page and applies any resulting
+    /// Forwards an input event to the current page and applies any resulting
     /// [`NavAction`] to this navigator.
     ///
-    /// Returns `true` when the current page handled the key or the navigation
+    /// Returns `true` when the current page handled the event or the navigation
     /// action changed the stack, and `false` when it returned
     /// [`PageEvent::Ignored`] or a no-op navigation such as [`NavAction::Pop`]
     /// at the root (allowing an outer shell page to handle keys like `Esc` when
     /// the sub-navigator is at its root).
-    pub fn handle_key(&mut self, ctx: &C, key: KeyEvent) -> bool {
+    pub fn handle_input(&mut self, ctx: &C, input: InputEvent) -> bool {
         let event = match self.current_mut() {
-            Some((route, page)) => page.on_key(ctx, route, key),
+            Some((route, page)) => page.on_input(ctx, route, input),
             None => PageEvent::Ignored,
         };
 
